@@ -22,3 +22,14 @@ The latest source includes lossless dynamic scene refit, precise vehicle pane de
 The 03:21 gameplay screenshots still showed blue panes after the first depth fix. The latest source separates dielectric glass Fresnel from opaque paint clear coat and fixes reversed pane normals. Native pixel tests pass; gameplay acceptance remains open.
 
 Performance fix parity is audited in the patched source `docs/PERFORMANCE_PARITY.md`: opt-in text logging, requested Retina sizing, traced-reflection environment-map bypass, event-driven mouse hover, legacy-shadow selection and HUD depth clearing are present. Metal and OpenGL builds pass; this is not a measured gameplay FPS gain.
+
+
+## October 18 performance checkpoint
+
+The source includes persistent ray-tracing residency, temporally accumulated sun shafts, coherent shadow/GI tile scheduling, motion-vector vehicle history, stable reflection preparation and footprint-based reflected texture mip selection. The accompanying source defaults request 90% render scale and 4x MSAA; existing user settings are retained. Historical gameplay figures are in [PERFORMANCE_PLAN.md](PERFORMANCE_PLAN.md), not a promise of FPS on another machine.
+
+Basic `REGTA_MTLGL_LOG=1` records CPU sections and three kernel encoder times every 240 traces. Expensive repeats/counters/rebuild experiments now additionally require `REGTA_RT_DIAGNOSTICS=1`. Timed frames use serialized encoder samples; normal rendering remains concurrent. A production no-window fixture checks identical output with logging off/basic/detailed and resource cleanup. See `docs/RT_PROFILING.md` in the reconstructed source.
+
+Step 3 (memoryless attachments/store actions/private textures) and CPU threading remain pending. Sun-shaft spikes and cold-cache traversal still need controlled gameplay measurements. The zebra-pattern scratches failed user review; their contact-driven replacement is deferred. No world/map conversion is included. Build/fixture results do not establish gameplay visual acceptance.
+
+Validation for this checkpoint: reconstructed the pinned upstream source with the published patch/library inputs and completed a clean Metal build for each game. All four local OpenGL/Metal executables built and were installed while stopped with signature checks, backups and unchanged INI hashes. No game was launched. A new gameplay performance comparison is pending.

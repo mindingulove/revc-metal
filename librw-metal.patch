@@ -171,7 +171,7 @@ index 671948f..0ee725e 100644
  	D3dRaster *ras;
  	if(compression){
 diff --git a/src/gl/gl3device.cpp b/src/gl/gl3device.cpp
-index 5275fe5..3fa594d 100644
+index 5275fe5..6c31a23 100644
 --- a/src/gl/gl3device.cpp
 +++ b/src/gl/gl3device.cpp
 @@ -1,7 +1,13 @@
@@ -238,7 +238,7 @@ index 5275fe5..3fa594d 100644
  int32 u_surfProps;
  
  Shader *defaultShader, *defaultShader_noAT;
-@@ -244,8 +272,150 @@ static GlState curGlState, oldGlState;
+@@ -244,8 +272,161 @@ static GlState curGlState, oldGlState;
  static int32 activeTexture;
  static uint32 boundTexture[MAXNUMSTAGES];
  
@@ -258,7 +258,7 @@ index 5275fe5..3fa594d 100644
 +// and produces coarse transitions even when the final image is bilinearly sampled.
 +// RenderRTHalfRes=1 remains an explicit performance option.
 +static int gRTDiv = 1;
-+static int gSceneMSAA = 2; // native Metal geometry samples, before RT and MetalFX
++static int gSceneMSAA = 4; // native Metal geometry samples, before RT and MetalFX (default 4x)
 +static bool gNeedVel = false;		// motion vector attachment needed (temporal upscaling or ray tracing)
 +static int gVelObj, gSceneSerial;
 +static float gVelPrevWorld[16];
@@ -293,7 +293,7 @@ index 5275fe5..3fa594d 100644
 +static std::unordered_map<const void*, VelEntry> gVelMap;
 +// Graphics options the game's menu changes while running (the menu stores them in re3.ini [Graphics] under the same keys).
 +// Index into kScaleTable for the render scale (restart needed for that one).
-+extern "C" { int8_t regtaGfxRTResolutionIdx=0, regtaGfxMSAAIdx=1, regtaGfxScaleIdx, regtaGfxTemporal, regtaGfxMetalFX, regtaGfxSSR, regtaGfxRT, regtaGfxRTRoads, regtaGfxRTShadows, regtaGfxPuddles = 1, regtaGfxRTAO = 1, regtaGfxRTGI = 1, regtaGfxRTLights = 1, regtaGfxRTGlass = 1, regtaGfxSunShafts = 1; }
++extern "C" { int8_t regtaGfxRTResolutionIdx=0, regtaGfxMSAAIdx=2, regtaGfxScaleIdx, regtaGfxTemporal, regtaGfxMetalFX, regtaGfxSSR, regtaGfxRT, regtaGfxRTRoads, regtaGfxRTShadows, regtaGfxPuddles = 1, regtaGfxRTAO = 1, regtaGfxRTGI = 1, regtaGfxRTLights = 1, regtaGfxRTGlass = 1, regtaGfxSunShafts = 1; }
 +static const float kScaleTable[6] = { 1.0f, 0.9f, 0.8f, 0.75f, 0.67f, 0.5f };
 +// frame cost of the extra graphics passes (milliseconds, smoothed): ray tracing, MetalFX, whole upscale/resolve step
 +#ifdef RW_METALGL
@@ -308,6 +308,17 @@ index 5275fe5..3fa594d 100644
 +// timer queries are optional in the GL loader: only use them when every entry point exists
 +static inline bool sceneQueriesUsable(void){ return glGenQueries && glBeginQuery && glEndQuery && glGetQueryObjectuiv && glGetQueryObjectui64v; }
 +static double gCollectAcc;	// time spent registering geometry with the ray tracer this frame
++// The same renderer runs GTA III (re3.ini) and Vice City (reVC.ini): read whichever settings file the game folder has.
++static const char *
++gameIniName(void)
++{
++	static const char *name = nullptr;
++	if(!name){
++		FILE *f = fopen("reVC.ini", "r");
++		if(f){ fclose(f); name = "reVC.ini"; } else name = "re3.ini";
++	}
++	return name;
++}
 +static inline double perfNow(void){ return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 +extern "C" int regtaMSAASupported(int samples){
 +#ifdef RW_METALGL
@@ -389,7 +400,7 @@ index 5275fe5..3fa594d 100644
  static uint32 blendMap[] = {
  	GL_ZERO,	// actually invalid
  	GL_ZERO,
-@@ -320,6 +490,10 @@ flushGlRenderState(void)
+@@ -320,6 +501,10 @@ flushGlRenderState(void)
  	if(oldGlState.blendEnable != curGlState.blendEnable){
  		oldGlState.blendEnable = curGlState.blendEnable;
  		(oldGlState.blendEnable ? glEnable : glDisable)(GL_BLEND);
@@ -400,7 +411,7 @@ index 5275fe5..3fa594d 100644
  	}
  
  	if(oldGlState.srcblend != curGlState.srcblend ||
-@@ -495,6 +669,7 @@ bindFramebuffer(uint32 fbo)
+@@ -495,6 +680,7 @@ bindFramebuffer(uint32 fbo)
  	if(currentFramebuffer != fbo){
  		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
  		currentFramebuffer = fbo;
@@ -408,7 +419,7 @@ index 5275fe5..3fa594d 100644
  	}
  }
  
-@@ -672,6 +847,39 @@ evictRaster(Raster *raster)
+@@ -672,6 +858,39 @@ evictRaster(Raster *raster)
  	}
  }
  
@@ -448,7 +459,7 @@ index 5275fe5..3fa594d 100644
  void
  setTexture(int32 stage, Texture *tex)
  {
-@@ -988,6 +1196,82 @@ setWorldMatrix(Matrix *mat)
+@@ -988,6 +1207,82 @@ setWorldMatrix(Matrix *mat)
  	convMatrix(&uniformObject.world, mat);
  	setUniform(u_world, &uniformObject.world);
  	objectDirty = 1;
@@ -531,7 +542,7 @@ index 5275fe5..3fa594d 100644
  }
  
  int32
-@@ -1193,6 +1477,90 @@ flushCache(void)
+@@ -1193,6 +1488,90 @@ flushCache(void)
  	flushUniforms();
  }
  
@@ -622,7 +633,7 @@ index 5275fe5..3fa594d 100644
  static void
  setFrameBuffer(Camera *cam)
  {
-@@ -1204,6 +1572,15 @@ setFrameBuffer(Camera *cam)
+@@ -1204,6 +1583,15 @@ setFrameBuffer(Camera *cam)
  	Gl3Raster *natzb = PLUGINOFFSET(Gl3Raster, zbuf, nativeRasterOffset);
  	assert(fbuf->type == Raster::CAMERA || fbuf->type == Raster::CAMERATEXTURE);
  
@@ -638,7 +649,7 @@ index 5275fe5..3fa594d 100644
  	// Have to make sure depth buffer is attached to FB's fbo
  	bindFramebuffer(natfb->fbo);
  	if(zbuf){
-@@ -1236,6 +1613,42 @@ setFrameBuffer(Camera *cam)
+@@ -1236,6 +1624,42 @@ setFrameBuffer(Camera *cam)
  			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
  		natfb->fboMate = nil;
  	}
@@ -681,7 +692,7 @@ index 5275fe5..3fa594d 100644
  }
  
  static Rect
-@@ -1250,23 +1663,47 @@ getFramebufferRect(Raster *frameBuffer)
+@@ -1250,23 +1674,47 @@ getFramebufferRect(Raster *frameBuffer)
  		SDL_GetWindowSize(glGlobals.window, &r.w, &r.h);
  #elif defined(LIBRW_GLFW)
  		glfwGetFramebufferSize(glGlobals.window, &r.w, &r.h);
@@ -735,7 +746,7 @@ index 5275fe5..3fa594d 100644
  	}
  
  	return r;
-@@ -1286,10 +1723,1577 @@ setViewport(Raster *frameBuffer)
+@@ -1286,10 +1734,1607 @@ setViewport(Raster *frameBuffer)
  	}
  }
  
@@ -1575,14 +1586,25 @@ index 5275fe5..3fa594d 100644
 +"void main(){\n"
 +"	ivec2 hi = textureSize(depthTex, 0) - 1;\n"
 +"	ivec2 base = ivec2(gl_FragCoord.xy)*div;\n"
-+"	// one sample per div x div block: keep the pixel with the strongest reflection (thin marked parts must not vanish)\n"
++"	// one sample per div x div block. The pixel with the strongest reflection keeps thin marked parts from vanishing, but on\n"
++"	// paint all pixels of a block are about equal and the winner changed with every frame's camera jitter: the traced spot\n"
++"	// hopped inside the block (shimmering, stair-stepped reflections). Take the same pixel every frame (the first in a fixed\n"
++"	// centre-out order) whenever it reflects at least half as strongly as the strongest one.\n"
++"	float strongest = 0.0;\n"
++"	for(int y = 0; y < div; y++)\n"
++"	for(int x = 0; x < div; x++)\n"
++"		strongest = max(strongest, texelFetch(reflTex, clamp(base + ivec2(x, y), ivec2(0), hi), 0).w);\n"
 +"	vec4 best = vec4(0.0);\n"
 +"	ivec2 bp = clamp(base, ivec2(0), hi);\n"
++"	float bestRank = 1e9;\n"
++"	vec2 mid = vec2(div - 1)*0.5;\n"
 +"	for(int y = 0; y < div; y++)\n"
 +"	for(int x = 0; x < div; x++){\n"
 +"		ivec2 q = clamp(base + ivec2(x, y), ivec2(0), hi);\n"
 +"		vec4 d = texelFetch(reflTex, q, 0);\n"
-+"		if(d.w > best.w){ best = vec4(d.xyz*2.0 - 1.0, d.w); bp = q; }	// encoded direction: *2-1\n"
++"		if(d.w <= 0.0 || d.w < strongest*0.5) continue;\n"
++"		float rank = dot(vec2(x, y) - mid, vec2(x, y) - mid) + float(y*div + x)*0.001;\n"
++"		if(rank < bestRank){ bestRank = rank; best = vec4(d.xyz*2.0 - 1.0, d.w); bp = q; }	// encoded direction: *2-1\n"
 +"	}\n"
 +"	oDepth = vec4(texelFetch(depthTex, bp, 0).r, (vec2(bp) + 0.5)/vec2(hi + 1), max(-texelFetch(velTex, bp, 0).b, 0.0));\n"
 +"	oDir = best;\n"
@@ -2010,9 +2032,15 @@ index 5275fe5..3fa594d 100644
 +resolveRenderScale(void)
 +{
 +	if(!gUseTarget || !gScaledFrame || !rsFbo || !rsCamera) return;
++	// CPU time of the sections of this step (REGTA_MTLGL_LOG=1: logged to metalfx.log every 240 frames)
++	static bool secLog = getenv("REGTA_MTLGL_LOG") != nullptr;
++	static double secAcc[5]; static int secFrames;
++	double secT = perfNow(), secStart = secT;
++	auto sec = [&](int i){ if(!secLog) return; double t = perfNow(); secAcc[i] += t - secT; secT = t; };
 +#ifdef RW_METALGL
 +	if(!mtlglResolveSceneMSAA(rsFbo)) fprintf(stderr,"Metal MSAA resolve failed\n");
 +#endif
++	sec(0);
 +	gScaledFrame = false;
 +	double resolveT0 = perfNow();
 +	// how long the scene took: CPU time since the frame began, and GPU time from a timer query (read one frame late)
@@ -2083,9 +2111,11 @@ index 5275fe5..3fa594d 100644
 +	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 +	glBindVertexArray(rsVao);
 +
++	sec(4);
 +	{
 +		double t0 = perfNow();
 +		rsRayTracePass();
++		sec(1);
 +		#ifdef RW_METALGL
 +        gPerfMs[0] += (mrtGpuMilliseconds()-gPerfMs[0])*0.05f;
 +#else
@@ -2098,6 +2128,7 @@ index 5275fe5..3fa594d 100644
 +	bool temporal = gTemporal && gJitterApplied && rsTemporalProg && rsHistTex[0] && rsVelTex && rsCamera->zBuffer;
 +	double mfxT0 = perfNow();
 +	bool mfxDone = temporal && gMetalFX && rsMetalFXPass();
++	sec(2);
 +	#ifdef RW_METALGL
 +    gPerfMs[1] += ((mfxDone?mfxGpuMilliseconds():0.0f)-gPerfMs[1])*0.05f;
 +#else
@@ -2192,6 +2223,16 @@ index 5275fe5..3fa594d 100644
 +	glGlobals.presentWidth = 0;
 +	setViewport(rsCamera->frameBuffer);
 +	gPerfMs[2] += ((float)(perfNow() - resolveT0) - gPerfMs[2])*0.05f;
++	sec(3);
++	if(secLog && ++secFrames == 240){
++		if(FILE *f = fopen("metalfx.log", "a")){
++			fprintf(f, "CPU upscale step: total %.2f ms | MSAA resolve %.2f, setup %.2f, ray tracing pass %.2f, MetalFX pass %.2f, rest (temporal/upscale/sharpen) %.2f\n",
++				(secAcc[0] + secAcc[1] + secAcc[2] + secAcc[3] + secAcc[4])/240, secAcc[0]/240, secAcc[4]/240, secAcc[1]/240, secAcc[2]/240, secAcc[3]/240);
++			fclose(f);
++		}
++		memset(secAcc, 0, sizeof(secAcc)); secFrames = 0;
++	}
++	(void)secStart;
 +}
 +
 +extern "C" void regtaResolveRenderScale(void) { resolveRenderScale(); }
@@ -2313,7 +2354,7 @@ index 5275fe5..3fa594d 100644
  	// View Matrix
  	Matrix inv;
  	Matrix::invert(&inv, cam->getFrame()->getLTM());
-@@ -1347,6 +3351,36 @@ beginUpdate(Camera *cam)
+@@ -1347,6 +3392,36 @@ beginUpdate(Camera *cam)
  		proj[15] = 1.0f;
  	}
  	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
@@ -2350,7 +2391,7 @@ index 5275fe5..3fa594d 100644
  	setProjectionMatrix(proj);
  
  	if(rwStateCache.fogStart != cam->fogPlane){
-@@ -1397,6 +3431,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1397,6 +3472,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  	if(mode & Camera::CLEARSTENCIL)
  		mask |= GL_STENCIL_BUFFER_BIT;
  	glDepthMask(GL_TRUE);
@@ -2371,7 +2412,7 @@ index 5275fe5..3fa594d 100644
  	glClear(mask);
  	glDepthMask(rwStateCache.zwrite);
  
-@@ -1404,9 +3452,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1404,9 +3493,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  		glDisable(GL_SCISSOR_TEST);
  }
  
@@ -2384,7 +2425,7 @@ index 5275fe5..3fa594d 100644
  //	glViewport(raster->offsetX, raster->offsetY,
  //		raster->width, raster->height);
  
-@@ -1423,11 +3474,94 @@ showRaster(Raster *raster, uint32 flags)
+@@ -1423,11 +3515,94 @@ showRaster(Raster *raster, uint32 flags)
  		SDL_GL_SetSwapInterval(0);
  	SDL_GL_SwapWindow(glGlobals.window);
  #elif defined(LIBRW_GLFW)
@@ -2483,7 +2524,7 @@ index 5275fe5..3fa594d 100644
  #else
  	not implemented
  #endif
-@@ -1449,8 +3583,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
+@@ -1449,8 +3624,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
  		case Raster::CAMERA:
  			setActiveTexture(0);
  			glBindTexture(GL_TEXTURE_2D, natdst->texid);
@@ -2497,7 +2538,7 @@ index 5275fe5..3fa594d 100644
  			glBindTexture(GL_TEXTURE_2D, boundTexture[0]);
  			return 1;
  		}
-@@ -1885,6 +4022,8 @@ static struct {
+@@ -1885,6 +4063,8 @@ static struct {
  	{ 0, 0, 0 },
  };
  
@@ -2506,14 +2547,14 @@ index 5275fe5..3fa594d 100644
  static int
  startGLFW(void)
  {
-@@ -1894,6 +4033,124 @@ startGLFW(void)
+@@ -1894,6 +4074,124 @@ startGLFW(void)
  	mode = &glGlobals.modes[glGlobals.currentMode];
  
  	glfwSetErrorCallback(glfwerr);
 +	{
 +		bool haveScaleIdx = false;
 +		int rtResolutionIdx=-1;
-+		if(FILE *ini = fopen("reVC.ini", "r")){
++		if(FILE *ini = fopen(gameIniName(), "r")){
 +			char line[256];
 +			bool inGraphics = false;
 +			while(fgets(line, sizeof(line), ini)){
@@ -2613,7 +2654,7 @@ index 5275fe5..3fa594d 100644
 +	{
 +		// re3.ini [Graphics] Retina=1 draws at the screen's native pixels (screen-sized camera textures follow)
 +		bool retina = false;
-+		if(FILE *ini = fopen("reVC.ini", "r")){
++		if(FILE *ini = fopen(gameIniName(), "r")){
 +			char line[256];
 +			bool inGraphics = false;
 +			while(fgets(line, sizeof(line), ini)){
@@ -2631,7 +2672,7 @@ index 5275fe5..3fa594d 100644
  	glfwWindowHint(GLFW_RED_BITS, mode->mode.redBits);
  	glfwWindowHint(GLFW_GREEN_BITS, mode->mode.greenBits);
  	glfwWindowHint(GLFW_BLUE_BITS, mode->mode.blueBits);
-@@ -1905,10 +4162,31 @@ startGLFW(void)
+@@ -1905,10 +4203,31 @@ startGLFW(void)
  		glfwWindowHint(GLFW_SAMPLES, glGlobals.numSamples);
  
  	int i;
@@ -2663,7 +2704,7 @@ index 5275fe5..3fa594d 100644
  
  		if(mode->flags & VIDEOMODEEXCLUSIVE)
  			win = glfwCreateWindow(mode->mode.width, mode->mode.height, glGlobals.winTitle, glGlobals.monitor, nil);
-@@ -1924,6 +4202,22 @@ startGLFW(void)
+@@ -1924,6 +4243,22 @@ startGLFW(void)
  		RWERROR((ERR_GENERAL, "glfwCreateWindow() failed"));
  		return 0;
  	}
@@ -2686,7 +2727,7 @@ index 5275fe5..3fa594d 100644
  	glfwMakeContextCurrent(win);
  
  	/* Init GLAD */
-@@ -1932,8 +4226,14 @@ startGLFW(void)
+@@ -1932,8 +4267,14 @@ startGLFW(void)
  		glfwDestroyWindow(win);
  		return 0;
  	}
@@ -2702,7 +2743,7 @@ index 5275fe5..3fa594d 100644
  
  	glGlobals.window = win;
  	*glGlobals.pWindow = win;
-@@ -1975,6 +4275,7 @@ initOpenGL(void)
+@@ -1975,6 +4316,7 @@ initOpenGL(void)
  */
  	gl3Caps.dxtSupported = !!GLAD_GL_EXT_texture_compression_s3tc;
  	gl3Caps.astcSupported = !!GLAD_GL_KHR_texture_compression_astc_ldr;
@@ -2710,7 +2751,7 @@ index 5275fe5..3fa594d 100644
  
  	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &gl3Caps.maxAnisotropy);
  
-@@ -2009,6 +4310,7 @@ initOpenGL(void)
+@@ -2009,6 +4351,7 @@ initOpenGL(void)
  	registerBlock("State");
  #endif
  	u_matColor = registerUniform("u_matColor", UNIFORM_VEC4);
@@ -2718,7 +2759,7 @@ index 5275fe5..3fa594d 100644
  	u_surfProps = registerUniform("u_surfProps", UNIFORM_VEC4);
  
  	// for im2d
-@@ -2060,10 +4362,10 @@ initOpenGL(void)
+@@ -2060,10 +4403,10 @@ initOpenGL(void)
  
  #include "shaders/default_vs_gl.inc"
  #include "shaders/simple_fs_gl.inc"
