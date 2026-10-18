@@ -171,7 +171,7 @@ index 671948f..0ee725e 100644
  	D3dRaster *ras;
  	if(compression){
 diff --git a/src/gl/gl3device.cpp b/src/gl/gl3device.cpp
-index 5275fe5..a92e618 100644
+index 5275fe5..58f11dd 100644
 --- a/src/gl/gl3device.cpp
 +++ b/src/gl/gl3device.cpp
 @@ -1,7 +1,13 @@
@@ -238,7 +238,7 @@ index 5275fe5..a92e618 100644
  int32 u_surfProps;
  
  Shader *defaultShader, *defaultShader_noAT;
-@@ -244,8 +272,151 @@ static GlState curGlState, oldGlState;
+@@ -244,8 +272,150 @@ static GlState curGlState, oldGlState;
  static int32 activeTexture;
  static uint32 boundTexture[MAXNUMSTAGES];
  
@@ -374,10 +374,9 @@ index 5275fe5..a92e618 100644
 +{
 +	if(!rsVelTex || currentFramebuffer != rsFbo) return;
 +	int want = gVelWant;
-+	// reflection marks are only written when somebody reads them: cars need them for ray traced reflections, ground and the
-+	// shaders that clear marks only while the ground is wet
++	// Active ray tracing needs window marks in dry weather too, and nonreflective draws must clear stale marks.
 +	if(want > 2){
-+		bool needed = gVelKind == 0 ? gRT : rtWetRoads();
++		bool needed = gRT || rtWetRoads(); // dry-weather windows also emit rays; other draws clear stale reflection marks
 +		if(!needed || !rsReflTex) want = 2;
 +	}
 +	if(want == 2 && !gTemporal) want = 1;		// motion vectors only matter for the temporal upscaler
@@ -390,7 +389,7 @@ index 5275fe5..a92e618 100644
  static uint32 blendMap[] = {
  	GL_ZERO,	// actually invalid
  	GL_ZERO,
-@@ -320,6 +491,10 @@ flushGlRenderState(void)
+@@ -320,6 +490,10 @@ flushGlRenderState(void)
  	if(oldGlState.blendEnable != curGlState.blendEnable){
  		oldGlState.blendEnable = curGlState.blendEnable;
  		(oldGlState.blendEnable ? glEnable : glDisable)(GL_BLEND);
@@ -401,7 +400,7 @@ index 5275fe5..a92e618 100644
  	}
  
  	if(oldGlState.srcblend != curGlState.srcblend ||
-@@ -495,6 +670,7 @@ bindFramebuffer(uint32 fbo)
+@@ -495,6 +669,7 @@ bindFramebuffer(uint32 fbo)
  	if(currentFramebuffer != fbo){
  		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
  		currentFramebuffer = fbo;
@@ -409,7 +408,7 @@ index 5275fe5..a92e618 100644
  	}
  }
  
-@@ -672,6 +848,35 @@ evictRaster(Raster *raster)
+@@ -672,6 +847,38 @@ evictRaster(Raster *raster)
  	}
  }
  
@@ -417,7 +416,9 @@ index 5275fe5..a92e618 100644
 +static bool gRTGlass = true;		// re3.ini [Graphics] RenderRTGlass
 +static float gRTGlassStrength = 0.5f;	// RenderRTGlassStrength
 +extern "C" int8_t regtaGfxRTGlass;
-+void
++extern "C" int regtaRTVehicleOwner(void *clump);
++extern "C" float regtaVehicleGlassStrength(void){return gRTGlass && regtaGfxRTGlass ? std::max(0.f,std::min(2.f,2.f*gRTGlassStrength)) : 0.f;}
++bool32
 +setGlassForTexture(Texture *tex)
 +{
 +	struct Entry { char name[32]; float v; };
@@ -438,14 +439,15 @@ index 5275fe5..a92e618 100644
 +			cache[tex] = e;
 +		}
 +	}
-+	float g[4] = { v*gRTGlassStrength, 0.0f, 0.0f, 0.0f };
++	float g[4] = { v*gRTGlassStrength, (float)regtaRTVehicleOwner(regtaRTVehicleClump), regtaRTVehicle ? 1.f : 0.f, 0.0f };
 +	setUniform(u_glassRefl, g);
++	return gRT && v > 0.0f;
 +}
 +
  void
  setTexture(int32 stage, Texture *tex)
  {
-@@ -988,6 +1193,82 @@ setWorldMatrix(Matrix *mat)
+@@ -988,6 +1195,82 @@ setWorldMatrix(Matrix *mat)
  	convMatrix(&uniformObject.world, mat);
  	setUniform(u_world, &uniformObject.world);
  	objectDirty = 1;
@@ -528,7 +530,7 @@ index 5275fe5..a92e618 100644
  }
  
  int32
-@@ -1193,6 +1474,90 @@ flushCache(void)
+@@ -1193,6 +1476,90 @@ flushCache(void)
  	flushUniforms();
  }
  
@@ -619,7 +621,7 @@ index 5275fe5..a92e618 100644
  static void
  setFrameBuffer(Camera *cam)
  {
-@@ -1204,6 +1569,15 @@ setFrameBuffer(Camera *cam)
+@@ -1204,6 +1571,15 @@ setFrameBuffer(Camera *cam)
  	Gl3Raster *natzb = PLUGINOFFSET(Gl3Raster, zbuf, nativeRasterOffset);
  	assert(fbuf->type == Raster::CAMERA || fbuf->type == Raster::CAMERATEXTURE);
  
@@ -635,7 +637,7 @@ index 5275fe5..a92e618 100644
  	// Have to make sure depth buffer is attached to FB's fbo
  	bindFramebuffer(natfb->fbo);
  	if(zbuf){
-@@ -1236,6 +1610,42 @@ setFrameBuffer(Camera *cam)
+@@ -1236,6 +1612,42 @@ setFrameBuffer(Camera *cam)
  			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
  		natfb->fboMate = nil;
  	}
@@ -678,7 +680,7 @@ index 5275fe5..a92e618 100644
  }
  
  static Rect
-@@ -1250,23 +1660,47 @@ getFramebufferRect(Raster *frameBuffer)
+@@ -1250,23 +1662,47 @@ getFramebufferRect(Raster *frameBuffer)
  		SDL_GetWindowSize(glGlobals.window, &r.w, &r.h);
  #elif defined(LIBRW_GLFW)
  		glfwGetFramebufferSize(glGlobals.window, &r.w, &r.h);
@@ -732,7 +734,7 @@ index 5275fe5..a92e618 100644
  	}
  
  	return r;
-@@ -1286,10 +1720,1577 @@ setViewport(Raster *frameBuffer)
+@@ -1286,10 +1722,1577 @@ setViewport(Raster *frameBuffer)
  	}
  }
  
@@ -2310,7 +2312,7 @@ index 5275fe5..a92e618 100644
  	// View Matrix
  	Matrix inv;
  	Matrix::invert(&inv, cam->getFrame()->getLTM());
-@@ -1347,6 +3348,36 @@ beginUpdate(Camera *cam)
+@@ -1347,6 +3350,36 @@ beginUpdate(Camera *cam)
  		proj[15] = 1.0f;
  	}
  	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
@@ -2347,7 +2349,7 @@ index 5275fe5..a92e618 100644
  	setProjectionMatrix(proj);
  
  	if(rwStateCache.fogStart != cam->fogPlane){
-@@ -1397,6 +3428,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1397,6 +3430,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  	if(mode & Camera::CLEARSTENCIL)
  		mask |= GL_STENCIL_BUFFER_BIT;
  	glDepthMask(GL_TRUE);
@@ -2368,7 +2370,7 @@ index 5275fe5..a92e618 100644
  	glClear(mask);
  	glDepthMask(rwStateCache.zwrite);
  
-@@ -1404,9 +3449,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1404,9 +3451,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  		glDisable(GL_SCISSOR_TEST);
  }
  
@@ -2381,7 +2383,7 @@ index 5275fe5..a92e618 100644
  //	glViewport(raster->offsetX, raster->offsetY,
  //		raster->width, raster->height);
  
-@@ -1423,11 +3471,94 @@ showRaster(Raster *raster, uint32 flags)
+@@ -1423,11 +3473,94 @@ showRaster(Raster *raster, uint32 flags)
  		SDL_GL_SetSwapInterval(0);
  	SDL_GL_SwapWindow(glGlobals.window);
  #elif defined(LIBRW_GLFW)
@@ -2480,7 +2482,7 @@ index 5275fe5..a92e618 100644
  #else
  	not implemented
  #endif
-@@ -1449,8 +3580,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
+@@ -1449,8 +3582,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
  		case Raster::CAMERA:
  			setActiveTexture(0);
  			glBindTexture(GL_TEXTURE_2D, natdst->texid);
@@ -2494,7 +2496,7 @@ index 5275fe5..a92e618 100644
  			glBindTexture(GL_TEXTURE_2D, boundTexture[0]);
  			return 1;
  		}
-@@ -1885,6 +4019,8 @@ static struct {
+@@ -1885,6 +4021,8 @@ static struct {
  	{ 0, 0, 0 },
  };
  
@@ -2503,7 +2505,7 @@ index 5275fe5..a92e618 100644
  static int
  startGLFW(void)
  {
-@@ -1894,6 +4030,124 @@ startGLFW(void)
+@@ -1894,6 +4032,124 @@ startGLFW(void)
  	mode = &glGlobals.modes[glGlobals.currentMode];
  
  	glfwSetErrorCallback(glfwerr);
@@ -2628,7 +2630,7 @@ index 5275fe5..a92e618 100644
  	glfwWindowHint(GLFW_RED_BITS, mode->mode.redBits);
  	glfwWindowHint(GLFW_GREEN_BITS, mode->mode.greenBits);
  	glfwWindowHint(GLFW_BLUE_BITS, mode->mode.blueBits);
-@@ -1905,10 +4159,31 @@ startGLFW(void)
+@@ -1905,10 +4161,31 @@ startGLFW(void)
  		glfwWindowHint(GLFW_SAMPLES, glGlobals.numSamples);
  
  	int i;
@@ -2660,7 +2662,7 @@ index 5275fe5..a92e618 100644
  
  		if(mode->flags & VIDEOMODEEXCLUSIVE)
  			win = glfwCreateWindow(mode->mode.width, mode->mode.height, glGlobals.winTitle, glGlobals.monitor, nil);
-@@ -1924,6 +4199,22 @@ startGLFW(void)
+@@ -1924,6 +4201,22 @@ startGLFW(void)
  		RWERROR((ERR_GENERAL, "glfwCreateWindow() failed"));
  		return 0;
  	}
@@ -2683,7 +2685,7 @@ index 5275fe5..a92e618 100644
  	glfwMakeContextCurrent(win);
  
  	/* Init GLAD */
-@@ -1932,8 +4223,14 @@ startGLFW(void)
+@@ -1932,8 +4225,14 @@ startGLFW(void)
  		glfwDestroyWindow(win);
  		return 0;
  	}
@@ -2699,7 +2701,7 @@ index 5275fe5..a92e618 100644
  
  	glGlobals.window = win;
  	*glGlobals.pWindow = win;
-@@ -1975,6 +4272,7 @@ initOpenGL(void)
+@@ -1975,6 +4274,7 @@ initOpenGL(void)
  */
  	gl3Caps.dxtSupported = !!GLAD_GL_EXT_texture_compression_s3tc;
  	gl3Caps.astcSupported = !!GLAD_GL_KHR_texture_compression_astc_ldr;
@@ -2707,7 +2709,7 @@ index 5275fe5..a92e618 100644
  
  	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &gl3Caps.maxAnisotropy);
  
-@@ -2009,6 +4307,7 @@ initOpenGL(void)
+@@ -2009,6 +4309,7 @@ initOpenGL(void)
  	registerBlock("State");
  #endif
  	u_matColor = registerUniform("u_matColor", UNIFORM_VEC4);
@@ -2715,7 +2717,7 @@ index 5275fe5..a92e618 100644
  	u_surfProps = registerUniform("u_surfProps", UNIFORM_VEC4);
  
  	// for im2d
-@@ -2060,10 +4359,10 @@ initOpenGL(void)
+@@ -2060,10 +4361,10 @@ initOpenGL(void)
  
  #include "shaders/default_vs_gl.inc"
  #include "shaders/simple_fs_gl.inc"
@@ -2731,10 +2733,28 @@ index 5275fe5..a92e618 100644
  	defaultShader = Shader::create(vs, fs);
  	assert(defaultShader);
 diff --git a/src/gl/gl3matfx.cpp b/src/gl/gl3matfx.cpp
-index 06b01c1..fc4984e 100644
+index 06b01c1..3ad9b42 100644
 --- a/src/gl/gl3matfx.cpp
 +++ b/src/gl/gl3matfx.cpp
-@@ -154,6 +154,7 @@ matfxRenderCB(Atomic *atomic, InstanceDataHeader *header)
+@@ -40,6 +40,7 @@ matfxDefaultRender(InstanceDataHeader *header, InstanceData *inst, int32 vsBits,
+ 	setMaterial(flags, m->color, m->surfaceProps);
+ 
+ 	setTexture(0, m->texture);
++	setGlassForTexture(m->texture);
+ 
+ 	rw::SetRenderState(VERTEXALPHA, inst->vertexAlpha || m->color.alpha != 0xFF);
+ 
+@@ -98,7 +99,8 @@ matfxEnvRender(InstanceDataHeader *header, InstanceData *inst, int32 vsBits, uin
+ 	Material *m;
+ 	m = inst->material;
+ 
+-	if(env->tex == nil || env->coefficient == 0.0f){
++	// Trace glass in the standard pass instead of clearing its ray metadata in the legacy environment pass.
++	if(setGlassForTexture(m->texture) || env->tex == nil || env->coefficient == 0.0f){
+ 		matfxDefaultRender(header, inst, vsBits, flags);
+ 		return;
+ 	}
+@@ -154,6 +156,7 @@ matfxRenderCB(Atomic *atomic, InstanceDataHeader *header)
  {
  	uint32 flags = atomic->geometry->flags;
  	setWorldMatrix(atomic->getFrame()->getLTM());
@@ -2742,7 +2762,7 @@ index 06b01c1..fc4984e 100644
  	int32 vsBits = lightingCB(atomic);
  
  	setupVertexInput(header);
-@@ -199,10 +200,10 @@ matfxOpen(void *o, int32, int32)
+@@ -199,10 +202,10 @@ matfxOpen(void *o, int32, int32)
  	matFXGlobals.pipelines[PLATFORM_GL3] = makeMatFXPipeline();
  
  #include "shaders/matfx_gl.inc"
@@ -2958,7 +2978,7 @@ index 6b69bbd..22bb8a7 100644
  	Driver::registerPlugin(PLATFORM_GL3, 0, ID_SKIN,
  	                       skinOpen, skinClose);
 diff --git a/src/gl/rwgl3.h b/src/gl/rwgl3.h
-index 65eb777..b3c6a8c 100644
+index 65eb777..f0cdf86 100644
 --- a/src/gl/rwgl3.h
 +++ b/src/gl/rwgl3.h
 @@ -70,6 +70,8 @@ enum AttribIndices
@@ -2966,7 +2986,7 @@ index 65eb777..b3c6a8c 100644
  // default uniform indices
  extern int32 u_matColor;
 +extern int32 u_glassRefl;
-+void setGlassForTexture(Texture *tex);
++bool32 setGlassForTexture(Texture *tex);
  extern int32 u_surfProps;
  
  struct InstanceData
@@ -3059,13 +3079,17 @@ index 6e3d6c4..aea54cc 100644
  
  "	v_tex0 = in_tex0;\n"
 diff --git a/src/gl/shaders/header.frag b/src/gl/shaders/header.frag
-index ba50165..950d94e 100644
+index ba50165..06d0e9b 100644
 --- a/src/gl/shaders/header.frag
 +++ b/src/gl/shaders/header.frag
-@@ -28,3 +28,132 @@ void DoAlphaTest(float a)
+@@ -28,3 +28,140 @@ void DoAlphaTest(float a)
  		discard;
  #endif
  }
++
++#ifdef WET_SURFACE
++uniform vec4 u_glassRefl; // strength, owner, vehicle flag
++#endif
 +
 +#if defined(HAS_VEL_OUT) && defined(VEL_PIPE)
 +layout(location = 1) out vec4 velOut;
@@ -3082,6 +3106,11 @@ index ba50165..950d94e 100644
 +	velOut = vec4((a - b)*0.5, u_velOn>0.5?u_actorId:groundMark, u_velOn*2.0);	// 2 = character
 +#else
 +	velOut = vec4((a - b)*0.5, u_velOn>0.5?u_actorId:groundMark, u_velOn);
++#ifdef WET_SURFACE
++	if(u_glassRefl.x>0.001 && u_glassRefl.z>0.5){
++		velOut.b=-u_glassRefl.y;velOut.a=-max(gl_FragCoord.z,1.0e-8);
++	}
++#endif
 +#endif
 +}
 +#define WRITE_VEL() WriteVel()
@@ -3105,7 +3134,6 @@ index ba50165..950d94e 100644
 +uniform vec2 u_rtParams;	// x: reflections available, y: strength
 +uniform sampler2D u_shadowPrev;	// last frame's traced sun shadows (softened, same size)
 +uniform vec2 u_shadowParams;	// x: shadows available, y: strength
-+uniform vec4 u_glassRefl;	// x: glass/window reflection strength of this material
 +vec3 glassDir = vec3(0.0);
 +float glassWeight = 0.0;
 +layout(location = 2) out vec4 reflOut;
@@ -3153,7 +3181,7 @@ index ba50165..950d94e 100644
 +		float cosT = clamp(-dot(viewDir, gn), 0.0, 1.0);
 +		float fres = 0.04 + 0.96*pow(1.0 - cosT, 5.0);
 +		glassDir = reflect(viewDir, gn);
-+		glassWeight = u_glassRefl.x*mix(0.3, 1.0, fres)*(1.0 - smoothstep(0.75, 0.95, abs(gn.z)));
++		glassWeight = u_glassRefl.x*mix(0.3, 1.0, fres)*(u_glassRefl.z > 0.5 ? 1.0 : 1.0 - smoothstep(0.75, 0.95, abs(gn.z)));
 +		// The current-frame trace is composited after opaque and transparent geometry.
 +
 +	}
@@ -3241,13 +3269,17 @@ index bb9881f..972f289 100644
 +#define WET_VS(wpos)
 +#endif
 diff --git a/src/gl/shaders/header_fs.inc b/src/gl/shaders/header_fs.inc
-index 802bb4f..8b06ed6 100644
+index 802bb4f..9370436 100644
 --- a/src/gl/shaders/header_fs.inc
 +++ b/src/gl/shaders/header_fs.inc
-@@ -29,4 +29,133 @@ const char *header_frag_src =
+@@ -29,4 +29,141 @@ const char *header_frag_src =
  "		discard;\n"
  "#endif\n"
  "}\n"
++
++"#ifdef WET_SURFACE\n"
++"uniform vec4 u_glassRefl; // strength, owner, vehicle flag\n"
++"#endif\n"
 +
 +"#if defined(HAS_VEL_OUT) && defined(VEL_PIPE)\n"
 +"layout(location = 1) out vec4 velOut;\n"
@@ -3264,6 +3296,11 @@ index 802bb4f..8b06ed6 100644
 +"	velOut = vec4((a - b)*0.5, u_velOn>0.5?u_actorId:groundMark, u_velOn*2.0);	// 2 = character\n"
 +"#else\n"
 +"	velOut = vec4((a - b)*0.5, u_velOn>0.5?u_actorId:groundMark, u_velOn);\n"
++"#ifdef WET_SURFACE\n"
++"	if(u_glassRefl.x>0.001 && u_glassRefl.z>0.5){\n"
++"		velOut.b=-u_glassRefl.y;velOut.a=-max(gl_FragCoord.z,1.0e-8);\n"
++"	}\n"
++"#endif\n"
 +"#endif\n"
 +"}\n"
 +"#define WRITE_VEL() WriteVel()\n"
@@ -3287,7 +3324,6 @@ index 802bb4f..8b06ed6 100644
 +"uniform vec2 u_rtParams;	// x: reflections available, y: strength\n"
 +"uniform sampler2D u_shadowPrev;	// last frame's traced sun shadows (softened, same size)\n"
 +"uniform vec2 u_shadowParams;	// x: shadows available, y: strength\n"
-+"uniform vec4 u_glassRefl;	// x: glass/window reflection strength of this material\n"
 +"vec3 glassDir = vec3(0.0);\n"
 +"float glassWeight = 0.0;\n"
 +"layout(location = 2) out vec4 reflOut;\n"
@@ -3335,7 +3371,7 @@ index 802bb4f..8b06ed6 100644
 +"		float cosT = clamp(-dot(viewDir, gn), 0.0, 1.0);\n"
 +"		float fres = 0.04 + 0.96*pow(1.0 - cosT, 5.0);\n"
 +"		glassDir = reflect(viewDir, gn);\n"
-+"		glassWeight = u_glassRefl.x*mix(0.3, 1.0, fres)*(1.0 - smoothstep(0.75, 0.95, abs(gn.z)));\n"
++"		glassWeight = u_glassRefl.x*mix(0.3, 1.0, fres)*(u_glassRefl.z > 0.5 ? 1.0 : 1.0 - smoothstep(0.75, 0.95, abs(gn.z)));\n"
 +"		// The current-frame trace is composited after opaque and transparent geometry.\n"
 +
 +"	}\n"

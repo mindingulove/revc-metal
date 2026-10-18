@@ -366,10 +366,10 @@ index 00000000..ac30673f
 +Advanced graphics now exposes "RT reflection/shadow resolution": 100%, 50%, or 25% of scene width and height. These correspond to one ray sample per 1x1, 2x2, or 4x4 scene block. Changes apply on the next frame, rebuild RT targets and invalidate temporal history. `RenderRTResolutionIdx=0/1/2` persists the selection and takes precedence over the legacy `RenderRTHalfRes` key regardless of INI order. Default is 100%. Lower choices affect the shared reflection/shadow/AO/light tracing grid, not just cars. Texture compression cannot replace this ray-count tradeoff.
 diff --git a/docs/REFLECTION_FIXES.md b/docs/REFLECTION_FIXES.md
 new file mode 100644
-index 00000000..6a8df4b0
+index 00000000..ad8f0d11
 --- /dev/null
 +++ b/docs/REFLECTION_FIXES.md
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,33 @@
 +# Reflection receiver and frame consistency fixes
 +
 +2026-10-18. Implemented in both GTA III and Vice City Metal sources.
@@ -386,6 +386,23 @@ index 00000000..6a8df4b0
 +
 +
 +03:21 gameplay regression: the user still observed strongly blue panes and an overlaid-looking driver after the first update. The next source correction separates glass from opaque paint's forced 60-90 percent coat and orients pane normals toward the viewer. Dielectric Fresnel starts at 0.04 (before authored specularity) and increases at grazing angles; specular highlights follow the same response. Actual Metal pixel tests compare both normal orientations and a grazing pane, preserve transmission, and verify paint remains unchanged. Gameplay acceptance remains open.
++
++
++## All car windows missing reflections: follow-up correction
++
++User report: reflections were absent from all car windows at every angle after the previous update. This remains a gameplay acceptance failure until the installed correction is checked.
++
++Confirmed pipeline defects: standard/MatFX vehicle materials did not set the glass uniform; the environment pass explicitly cleared ray metadata; and generic reflection attachments were disabled in dry weather. Glass now receives the standard traced pass, writes its own depth and vehicle owner, and emits reflection data on dry surfaces. Vehicle glass is exempt from the static-building horizontal-surface mask. Neo glass now follows the glass on/off/strength control and uses a display-strength remap of Fresnel to keep reflected scenery legible while retaining cabin transmission. This remap is artistic, not a change to physical Fresnel or trace quality; specular highlights retain the original dielectric response. Opaque paint remains unchanged.
++
++Validation: both OpenGL and both Metal builds pass. Native Metal material tests preserve cabin visibility, normal/backface agreement and paint behaviour. The full production Neo and MatFX renderer fixture uses a textured transparent pane, 4x MSAA, reduced-resolution RT preparation, ray tracing and current-frame composite. Both pipelines produce visible reflections head-on and at grazing angles; glass Off removes traced contribution. The fixture runs offscreen without starting the game. It supplies offscreen targets and enables the main-camera matrix branch for that offscreen camera; it does not verify presentation or actual gameplay temporal history. Existing render scale, Retina, RT resolution, geometry, MSAA and temporal settings are retained. Dry-weather reflection metadata adds bandwidth; no FPS improvement is claimed.
++
++Installation: all four signed binaries installed while both games were stopped; settings hashes unchanged. No game was launched.
++
++- regta-upstate-run: Metal SHA256 `1e6c4801799ec563f5b8f0533969f823943627af0851171d68e7966743fd2cfb`; backup `/Users/jaymeeduardo/Documents/regta-upstate-run/backups/window-reflections-20261018-051333`.
++
++- revc-metal-run: Metal SHA256 `dbe956d9709f927ed68db6a6b9b8b2fa6255fd06d5462c2923af207eea78d4ed`; backup `/Users/jaymeeduardo/Documents/revc-metal-run/backups/window-reflections-20261018-051333`.
++
++Regression check: restoring the old dry-weather gate in a temporary test copy eliminates standard-pipeline reflection output and fails the visible-reflection assertion.
 diff --git a/docs/SUN_RAYS_AND_MSAA.md b/docs/SUN_RAYS_AND_MSAA.md
 new file mode 100644
 index 00000000..99b35cf4
@@ -5402,7 +5419,7 @@ index 7ad239f0..84035c03 100644
  extern InterpolatedFloat Power;
  extern InterpolatedLight DiffColor;
 diff --git a/src/extras/custompipes_gl.cpp b/src/extras/custompipes_gl.cpp
-index d74e40db..705527db 100644
+index d74e40db..d3edc5ef 100644
 --- a/src/extras/custompipes_gl.cpp
 +++ b/src/extras/custompipes_gl.cpp
 @@ -1,4 +1,6 @@
@@ -5421,12 +5438,13 @@ index d74e40db..705527db 100644
  
  #ifdef EXTENDED_PIPELINES
  
-@@ -73,12 +77,25 @@ uploadSpecLights(void)
+@@ -73,12 +77,26 @@ uploadSpecLights(void)
  	glUniform4fv(U(u_specColor), 1 + NUMEXTRADIRECTIONALS, (float*)&colors);
  }
  
 +extern "C" void regtaSceneCaptureInvalidate(void);
 +extern "C" int regtaRTReflectionsActive(void);
++extern "C" float regtaVehicleGlassStrength(void);
 +extern "C" int regtaRTVehicleOwner(void *clump);
 +extern "C" int regtaSceneCapture(unsigned *colorTex, unsigned *depthTex, float *texSize, float *viewport, float *proj, float *view);
 +
@@ -5447,7 +5465,7 @@ index d74e40db..705527db 100644
  	// TODO: make this less of a kludge
  	if(VehiclePipeSwitch == VEHICLEPIPE_MATFX){
  		matFXGlobals.pipelines[rw::platform]->render(atomic);
-@@ -87,8 +104,27 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -87,8 +105,27 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  
  	Material *m;
  
@@ -5475,7 +5493,7 @@ index d74e40db..705527db 100644
  	lightingCB(atomic);
  
  	setupVertexInput(header);
-@@ -97,6 +133,52 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -97,6 +134,52 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  	rw::int32 n = header->numMeshes;
  
  	neoVehicleShader->use();
@@ -5528,7 +5546,7 @@ index d74e40db..705527db 100644
  
  	V3d eyePos = rw::engine->currentCamera->getFrame()->getLTM()->pos;
  	glUniform3fv(U(u_eye), 1, (float*)&eyePos);
-@@ -117,14 +199,50 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -117,14 +200,51 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  		setMaterial(flags, m->color, m->surfaceProps);
  
  		setTexture(0, m->texture);
@@ -5571,6 +5589,7 @@ index d74e40db..705527db 100644
 +		}
 +		glUniform4f(glGetUniformLocation(currentShader->program,"u_dirtProps"),glass ? 0.f : dirtAmount,dirtSeed,dirtFloor,dirtHeight);
 +		glUniform1f(glGetUniformLocation(currentShader->program,"u_glassMaterial"),glass ? 1.f : 0.f);
++		glUniform1f(glGetUniformLocation(currentShader->program,"u_glassReflectionStrength"),regtaVehicleGlassStrength());
  		glUniform4fv(U(u_reflProps), 1, reflProps);
  
 +        uint32 oldZ=rw::GetRenderState(ZWRITEENABLE),oldCull=rw::GetRenderState(CULLMODE),oldAlpha=rw::GetRenderState(ALPHATESTFUNC);
@@ -5580,7 +5599,7 @@ index d74e40db..705527db 100644
  		inst++;
  	}
  
-@@ -155,8 +273,8 @@ CreateVehiclePipe(void)
+@@ -155,8 +275,8 @@ CreateVehiclePipe(void)
  	{
  #include "shaders/obj/neoVehicle_frag.inc"
  #include "shaders/obj/neoVehicle_vert.inc"
@@ -5591,7 +5610,7 @@ index d74e40db..705527db 100644
  	neoVehicleShader = Shader::create(vs, fs);
  	assert(neoVehicleShader);
  	}
-@@ -201,6 +319,7 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -201,6 +321,7 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  	Material *m;
  
  	setWorldMatrix(atomic->getFrame()->getLTM());
@@ -5599,7 +5618,7 @@ index d74e40db..705527db 100644
  	lightingCB(atomic);
  
  	setupVertexInput(header);
-@@ -210,6 +329,16 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -210,6 +331,16 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  
  	neoWorldShader->use();
  
@@ -5616,7 +5635,7 @@ index d74e40db..705527db 100644
  	float lightfactor[4];
  
  	while(n--){
-@@ -234,12 +363,20 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -234,12 +365,20 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  		setMaterial(color, m->surfaceProps);
  
  		setTexture(0, m->texture);
@@ -5637,7 +5656,7 @@ index d74e40db..705527db 100644
  	setTexture(1, nil);
  	teardownVertexInput(header);
  }
-@@ -258,8 +395,8 @@ CreateWorldPipe(void)
+@@ -258,8 +397,8 @@ CreateWorldPipe(void)
  	{
  #include "shaders/obj/neoWorldVC_frag.inc"
  #include "shaders/obj/default_UV2_vert.inc"
@@ -5648,7 +5667,7 @@ index d74e40db..705527db 100644
  	neoWorldShader = Shader::create(vs, fs);
  	assert(neoWorldShader);
  	}
-@@ -298,7 +435,7 @@ glossRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -298,7 +437,7 @@ glossRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  	using namespace rw::gl3;
  
  	worldRenderCB(atomic, header);
@@ -5657,7 +5676,7 @@ index d74e40db..705527db 100644
  		return;
  
  	Material *m;
-@@ -428,6 +565,7 @@ rimSkinRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -428,6 +567,7 @@ rimSkinRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  
  	rw::uint32 flags = atomic->geometry->flags;
  	setWorldMatrix(atomic->getFrame()->getLTM());
@@ -5665,7 +5684,7 @@ index d74e40db..705527db 100644
  	lightingCB(atomic);
  
  	setupVertexInput(header);
-@@ -516,8 +654,8 @@ CreateRimLightPipes(void)
+@@ -516,8 +656,8 @@ CreateRimLightPipes(void)
  	{
  #include "shaders/obj/simple_frag.inc"
  #include "shaders/obj/neoRimSkin_vert.inc"
@@ -5676,7 +5695,7 @@ index d74e40db..705527db 100644
  	neoRimSkinShader = Shader::create(vs, fs);
  	assert(neoRimSkinShader);
  	}
-@@ -525,8 +663,8 @@ CreateRimLightPipes(void)
+@@ -525,8 +665,8 @@ CreateRimLightPipes(void)
  	{
  #include "shaders/obj/simple_frag.inc"
  #include "shaders/obj/neoRim_vert.inc"
@@ -13695,10 +13714,10 @@ index 1515ad71..f99560f2 100644
  
  	v_tex0 = in_tex0;
 diff --git a/src/extras/shaders/neoVehicle.frag b/src/extras/shaders/neoVehicle.frag
-index 2ac24f70..dd6ee68e 100644
+index 2ac24f70..5ef5987f 100644
 --- a/src/extras/shaders/neoVehicle.frag
 +++ b/src/extras/shaders/neoVehicle.frag
-@@ -1,22 +1,190 @@
+@@ -1,22 +1,192 @@
 +#ifdef GL2
 +#define textureLod(s, c, l) texture(s, c)
 +#endif
@@ -13712,6 +13731,7 @@ index 2ac24f70..dd6ee68e 100644
 +uniform vec4 u_ssrTex;		// capture size, mode: -1 ray tracing, 0 legacy, 1 screen space
 +uniform vec4 u_reflProps;
 +uniform float u_reflectionOwner;
++uniform float u_glassReflectionStrength;
 +uniform float u_glassMaterial; // dielectric pane, separate from opaque paint clear coat
 +uniform vec4 u_dirtProps; // coverage, stable seed, lower body Z, body height
 +uniform vec2 u_dirtAxles; // front/rear wheel Y in car space
@@ -13854,7 +13874,8 @@ index 2ac24f70..dd6ee68e 100644
 +		reflectionWeight = mix(0.60,0.90,f*f*f*f*f)*coat;
 +	}
 +	float glassFresnel = 0.04 + 0.96*f*f*f*f*f;
-+	if(u_glassMaterial > 0.5) reflectionWeight = glassFresnel*clamp(u_reflProps.z,0.0,1.0);
++	// Display-strength remap keeps a clear pane's reflected scene legible; not a change to ray quality.
++	if(u_glassMaterial > 0.5) reflectionWeight = clamp((1.0-pow(1.0-glassFresnel,3.0))*clamp(u_reflProps.z,0.0,1.0)*u_glassReflectionStrength,0.0,0.9);
 +	float dirt=dirtCoverage();
 +	reflectionWeight *= 1.0-dirt*0.88;
 +	vec4 sampled = texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));
@@ -13893,7 +13914,7 @@ index 2ac24f70..dd6ee68e 100644
  
  	vec4 color;
  	color.rgb = pass1.rgb*pass1.a + pass2;
-@@ -25,5 +193,15 @@ main(void)
+@@ -25,5 +195,15 @@ main(void)
  //	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);
  	DoAlphaTest(color.a);
  
@@ -14078,10 +14099,10 @@ index 7cd199d0..ad81d0c4 100644
  
  "	v_tex0 = in_tex0;\n"
 diff --git a/src/extras/shaders/obj/neoVehicle_frag.inc b/src/extras/shaders/obj/neoVehicle_frag.inc
-index 20537440..c38d82c9 100644
+index 20537440..a077ef5d 100644
 --- a/src/extras/shaders/obj/neoVehicle_frag.inc
 +++ b/src/extras/shaders/obj/neoVehicle_frag.inc
-@@ -1,23 +1,191 @@
+@@ -1,23 +1,193 @@
  const char *neoVehicle_frag_src =
 +"#ifdef GL2\n"
 +"#define textureLod(s, c, l) texture(s, c)\n"
@@ -14096,6 +14117,7 @@ index 20537440..c38d82c9 100644
 +"uniform vec4 u_ssrTex;		// capture size, mode: -1 ray tracing, 0 legacy, 1 screen space\n"
 +"uniform vec4 u_reflProps;\n"
 +"uniform float u_reflectionOwner;\n"
++"uniform float u_glassReflectionStrength;\n"
 +"uniform float u_glassMaterial; // dielectric pane, separate from opaque paint clear coat\n"
 +"uniform vec4 u_dirtProps; // coverage, stable seed, lower body Z, body height\n"
 +"uniform vec2 u_dirtAxles; // front/rear wheel Y in car space\n"
@@ -14238,7 +14260,8 @@ index 20537440..c38d82c9 100644
 +"		reflectionWeight = mix(0.60,0.90,f*f*f*f*f)*coat;\n"
 +"	}\n"
 +"	float glassFresnel = 0.04 + 0.96*f*f*f*f*f;\n"
-+"	if(u_glassMaterial > 0.5) reflectionWeight = glassFresnel*clamp(u_reflProps.z,0.0,1.0);\n"
++"	// Display-strength remap keeps a clear pane's reflected scene legible; not a change to ray quality.\n"
++"	if(u_glassMaterial > 0.5) reflectionWeight = clamp((1.0-pow(1.0-glassFresnel,3.0))*clamp(u_reflProps.z,0.0,1.0)*u_glassReflectionStrength,0.0,0.9);\n"
 +"	float dirt=dirtCoverage();\n"
 +"	reflectionWeight *= 1.0-dirt*0.88;\n"
 +"	vec4 sampled = texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));\n"
@@ -14277,7 +14300,7 @@ index 20537440..c38d82c9 100644
  
  "	vec4 color;\n"
  "	color.rgb = pass1.rgb*pass1.a + pass2;\n"
-@@ -26,6 +194,16 @@ const char *neoVehicle_frag_src =
+@@ -26,6 +196,16 @@ const char *neoVehicle_frag_src =
  "//	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);\n"
  "	DoAlphaTest(color.a);\n"
  
@@ -16265,10 +16288,10 @@ index 00000000..1ca6534a
 +}
 diff --git a/tools-mtl/dielectric-glass-test.cpp b/tools-mtl/dielectric-glass-test.cpp
 new file mode 100644
-index 00000000..c5672e96
+index 00000000..31a366d9
 --- /dev/null
 +++ b/tools-mtl/dielectric-glass-test.cpp
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,114 @@
 +// Hidden-window test of the actual vehicle shaders and final ray-reflection composite.
 +// clang++ -std=c++17 tools-mtl/vehicle-paint-reflection-test.cpp -I/opt/homebrew/include \
 +//   -L/opt/homebrew/lib -lglfw -framework OpenGL -o /tmp/vehicle-paint-reflection-test
@@ -16348,6 +16371,7 @@ index 00000000..c5672e96
 + glUniform4f(glGetUniformLocation(p,"u_dirtProps"),0,0,0,1);
 + float pane[]={82.f/255,89.f/255,82.f/255,49.f/255};
 + float previousOpacity=0,currentOpacity=0;
++ glUniform1f(glGetUniformLocation(p,"u_glassReflectionStrength"),1);
 + glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),1);
 + for(int corrected=0;corrected<2;corrected++){
 +  glUseProgram(p);glDrawBuffers(3,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
@@ -16359,7 +16383,7 @@ index 00000000..c5672e96
 +  float ray[4],paneColor[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);
 +  glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,paneColor);
 +  assert(paneColor[3]>.07f && paneColor[3]<.25f);
-+  if(corrected){assert(ray[3]>.026f && ray[3]<.05f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
++  if(corrected){assert(ray[3]>.074f && ray[3]<.10f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
 +  // Render the same pane over an opaque interior using the production premultiplied blend.
 +  glDrawBuffers(1,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
 +  glEnable(GL_BLEND);glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);
@@ -16374,8 +16398,9 @@ index 00000000..c5672e96
 +  float nx=side==2?sqrtf(.99f):0.f,nz=side==1?-1.f:(side==2?.1f:1.f);
 +  testAttrib3(1,nx,0,nz);glDrawArrays(GL_TRIANGLES,0,3);float ray[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);glassWeight[side]=ray[3];
 + }
-+ assert(fabsf(glassWeight[0]-.04f*.65f)<.0001f);assert(fabsf(glassWeight[1]-glassWeight[0])<1e-6f);assert(glassWeight[2]>glassWeight[0]*10 && glassWeight[2]<.65f);
++ assert(fabsf(glassWeight[0]-(1-powf(.96f,3))*.65f)<.0001f);assert(fabsf(glassWeight[1]-glassWeight[0])<1e-6f);assert(glassWeight[2]>glassWeight[0]*5 && glassWeight[2]<.65f);
 + printf("PASS dielectric glass: normal %.5f, reverse normal %.5f, grazing %.5f; opaque paint response remains separate.\n",glassWeight[0],glassWeight[1],glassWeight[2]);
++ glUniform1f(glGetUniformLocation(p,"u_glassReflectionStrength"),0);glDrawArrays(GL_TRIANGLES,0,3);float off[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,off);assert(off[3]==0);glUniform1f(glGetUniformLocation(p,"u_glassReflectionStrength"),1);
 + testAttrib3(1,sqrtf(.5f),0,sqrtf(.5f));glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),0);
 +
 + printf("PASS actual Metal vehicle glass shader: opacity %.4f -> %.4f, reflection weight restored, opaque interior remains visible through premultiplied pane.\n",previousOpacity,currentOpacity);
@@ -18022,10 +18047,10 @@ index 00000000..e2727f9c
 + printf("failures: %d\n",fails); return fails; }
 diff --git a/tools-mtl/vehicle-glass-test.cpp b/tools-mtl/vehicle-glass-test.cpp
 new file mode 100644
-index 00000000..2d3b4bae
+index 00000000..f346b409
 --- /dev/null
 +++ b/tools-mtl/vehicle-glass-test.cpp
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,176 @@
 +// Hidden-window test of the actual vehicle shaders and final ray-reflection composite.
 +// clang++ -std=c++17 tools-mtl/vehicle-paint-reflection-test.cpp -I/opt/homebrew/include \
 +//   -L/opt/homebrew/lib -lglfw -framework OpenGL -o /tmp/vehicle-paint-reflection-test
@@ -18105,6 +18130,7 @@ index 00000000..2d3b4bae
 + glUniform4f(glGetUniformLocation(p,"u_dirtProps"),0,0,0,1);
 + float pane[]={82.f/255,89.f/255,82.f/255,49.f/255};
 + float previousOpacity=0,currentOpacity=0;
++ glUniform1f(glGetUniformLocation(p,"u_glassReflectionStrength"),1);
 + glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),1);
 + for(int corrected=0;corrected<2;corrected++){
 +  glUseProgram(p);glDrawBuffers(3,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
@@ -18116,7 +18142,7 @@ index 00000000..2d3b4bae
 +  float ray[4],paneColor[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);
 +  glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,paneColor);
 +  assert(paneColor[3]>.07f && paneColor[3]<.25f);
-+  if(corrected){assert(ray[3]>.026f && ray[3]<.05f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
++  if(corrected){assert(ray[3]>.074f && ray[3]<.10f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
 +  // Render the same pane over an opaque interior using the production premultiplied blend.
 +  glDrawBuffers(1,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
 +  glEnable(GL_BLEND);glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);
@@ -18131,8 +18157,9 @@ index 00000000..2d3b4bae
 +  float nx=side==2?sqrtf(.99f):0.f,nz=side==1?-1.f:(side==2?.1f:1.f);
 +  testAttrib3(1,nx,0,nz);glDrawArrays(GL_TRIANGLES,0,3);float ray[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);glassWeight[side]=ray[3];
 + }
-+ assert(fabsf(glassWeight[0]-.04f*.65f)<.0001f);assert(fabsf(glassWeight[1]-glassWeight[0])<1e-6f);assert(glassWeight[2]>glassWeight[0]*10 && glassWeight[2]<.65f);
++ assert(fabsf(glassWeight[0]-(1-powf(.96f,3))*.65f)<.0001f);assert(fabsf(glassWeight[1]-glassWeight[0])<1e-6f);assert(glassWeight[2]>glassWeight[0]*5 && glassWeight[2]<.65f);
 + printf("PASS dielectric glass: normal %.5f, reverse normal %.5f, grazing %.5f; opaque paint response remains separate.\n",glassWeight[0],glassWeight[1],glassWeight[2]);
++ glUniform1f(glGetUniformLocation(p,"u_glassReflectionStrength"),0);glDrawArrays(GL_TRIANGLES,0,3);float off[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,off);assert(off[3]==0);glUniform1f(glGetUniformLocation(p,"u_glassReflectionStrength"),1);
 + testAttrib3(1,sqrtf(.5f),0,sqrtf(.5f));glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),0);
 +
 + printf("PASS actual Metal vehicle glass shader: opacity %.4f -> %.4f, reflection weight restored, opaque interior remains visible through premultiplied pane.\n",previousOpacity,currentOpacity);
@@ -18323,6 +18350,90 @@ index 00000000..e93ef795
 + printf("Dirt states clear-coat weights: %.4f / %.4f / %.4f; fabric %.4f, car-space stability checked.\n",dirtWeights[0],dirtWeights[1],dirtWeights[2],fabric[3]);
 + printf("Vehicle paint ray and compositing maximum error: %.6f\n",maxError);glfwDestroyWindow(win);glfwTerminate();return maxError<1e-4f?0:2;
 +}
+diff --git a/tools-mtl/vehicle-window-pipeline-test.cpp b/tools-mtl/vehicle-window-pipeline-test.cpp
+new file mode 100644
+index 00000000..c72bb766
+--- /dev/null
++++ b/tools-mtl/vehicle-window-pipeline-test.cpp
+@@ -0,0 +1,48 @@
++#include "common.h"
++#include "main.h"
++#include "Lights.h"
++#include "custompipes.h"
++extern "C" int mtlglResolveSceneMSAA(unsigned);
++extern "C" int mtlglSceneMSAASamples(unsigned);
++extern "C" {void windowFixtureDevice();void windowFixtureTargets(rw::Camera*);void windowFixtureFinish();}
++#include "../src/extras/metalfx/MetalRT.h"
++extern "C" {extern int8_t regtaGfxRT,regtaGfxTemporal,regtaGfxMetalFX,regtaGfxRTShadows,regtaGfxRTAO,regtaGfxRTGI,regtaGfxRTLights,regtaGfxRTResolutionIdx,regtaGfxMSAAIdx,regtaGfxRTGlass;extern int regtaVelocityDynamic,regtaRTVehicle;void regtaResolveRenderScale(void);}
++#include "../vendor/librw/src/gl/glad/glad.h"
++#include <GLFW/glfw3.h>
++#include <cassert>
++#include <initializer_list>
++#include <cstdio>
++extern "C" int windowPipelineTest(int argc,char**){
++ using namespace rw;bool standard=argc>1;
++ assert(Engine::init());registerSkinPlugin();registerHAnimPlugin();registerMatFXPlugin();CustomPipes::CustomPipeRegister();windowFixtureDevice();GLFWwindow *window=nullptr;EngineOpenParams params={&window,64,64,"window pipeline fixture"};assert(Engine::open(&params));assert(Engine::start());rw::platform=rw::PLATFORM_GL3;
++ Scene.world=World::create();auto *camera=Camera::create();camera->setFrame(Frame::create());camera->frameBuffer=Raster::create(64,64,0,Raster::CAMERATEXTURE);camera->zBuffer=Raster::create(64,64,0,Raster::ZBUFFER);camera->setNearPlane(.1f);camera->setFarPlane(100);V2d view={1,1};camera->setViewWindow(&view);Scene.world->addCamera(camera);Scene.camera=camera;windowFixtureTargets(camera);
++ pDirect=Light::create(Light::DIRECTIONAL);pDirect->setFrame(Frame::create());for(auto &light:pExtraDirectionals){light=Light::create(Light::DIRECTIONAL);light->setFrame(Frame::create());light->setFlags(0);}
++ regtaGfxRT=1;regtaGfxTemporal=regtaGfxMetalFX=regtaGfxRTShadows=regtaGfxRTAO=regtaGfxRTGI=regtaGfxRTLights=0;regtaGfxRTResolutionIdx=1;regtaGfxMSAAIdx=2;regtaGfxTemporal=1;
++ unsigned outputs[MRT_NUM_TEXTURES];assert(mrtSetup(64,64,outputs));
++ float reflector[]={-1000,-1000,-5,1000,-1000,-5,0,1000,-5};uint32_t index[]={0,1,2};const uint32_t *indices[]={index};int indexCount=3,casts=1;float red[]={1,0,0,1,1,1},identity[]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};int id=mrtAddGeometry(reflector,3,1,indices,&indexCount,red,&casts);assert(id>=0);mrtAddInstance(id,identity,55,0);
++ CustomPipes::CreateVehiclePipe();CustomPipes::VehiclePipeSwitch=standard?CustomPipes::VEHICLEPIPE_MATFX:CustomPipes::VEHICLEPIPE_NEO;
++ auto *geo=Geometry::create(3,1,Geometry::MODULATE|Geometry::POSITIONS|Geometry::NORMALS|Geometry::PRELIT|Geometry::TEXTURED);geo->morphTargets[0].vertices[0]={-10,-10,5};geo->morphTargets[0].vertices[1]={10,-10,5};geo->morphTargets[0].vertices[2]={0,10,5};for(int i=0;i<3;i++){geo->morphTargets[0].normals[i]={0,0,-1};geo->colors[i]={255,255,255,255};geo->texCoords[0][i]={0,0};}geo->triangles[0].v[0]=0;geo->triangles[0].v[1]=1;geo->triangles[0].v[2]=2;geo->triangles[0].matId=0;
++ auto *mat=Material::create();mat->color={255,255,255,249};auto *image=Image::create(1,1,32);image->allocate();image->pixels[0]=82;image->pixels[1]=89;image->pixels[2]=82;image->pixels[3]=49;auto *raster=Raster::createFromImage(image,rw::PLATFORM_GL3);assert(raster);auto *texture=Texture::create(raster);assert(texture);strcpy(texture->name,"vehicle_generic_glasswindows2");mat->setTexture(texture);if(standard){MatFX::setEffects(mat,MatFX::ENVMAP);MatFX::get(mat)->setEnvTexture(texture);MatFX::get(mat)->setEnvCoefficient(.25f);}mat->surfaceProps={1,.65f,1};geo->matList.appendMaterial(mat);geo->calculateBoundingSphere();geo->unlock();auto *atomic=Atomic::create();atomic->setFrame(Frame::create());atomic->setGeometry(geo,0);CustomPipes::AttachVehiclePipe(atomic);
++ regtaVelocityDynamic=regtaRTVehicle=1;
++ RGBA clear={30,30,30,255};camera->clear(&clear,Camera::CLEARIMAGE|Camera::CLEARZ);camera->beginUpdate();
++ GLuint fbo;glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,(GLint*)&fbo);
++ SetRenderState(CULLMODE,CULLNONE);SetRenderState(ZTESTENABLE,1);SetRenderState(ZWRITEENABLE,1);SetRenderState(ALPHATESTFUNC,ALPHAALWAYS);
++ atomic->render();regtaResolveRenderScale();camera->endUpdate();windowFixtureFinish();
++ id=mrtAddGeometry(reflector,3,1,indices,&indexCount,red,&casts);assert(id>=0);mrtAddInstance(id,identity,55,0);
++ for(int i=2;i<9;i+=3)reflector[i]=15;int rear=mrtAddGeometry(reflector,3,1,indices,&indexCount,red,&casts);assert(rear>=0);mrtAddInstance(rear,identity,56,0);
++ camera->clear(&clear,Camera::CLEARIMAGE|Camera::CLEARZ);camera->beginUpdate();glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,(GLint*)&fbo);atomic->render();
++ assert(mtlglSceneMSAASamples(fbo)==4);mtlglResolveSceneMSAA(fbo);float ray[4]={},vel[4]={};glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(32,32,1,1,GL_RGBA,GL_FLOAT,ray);glReadBuffer(GL_COLOR_ATTACHMENT1);glReadPixels(32,32,1,1,GL_RGBA,GL_FLOAT,vel);float base[4];glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(32,32,1,1,GL_RGBA,GL_FLOAT,base);printf("Actual FBO %u base %f %f %f alpha %f GL error %x\n",fbo,base[0],base[1],base[2],base[3],glGetError());printf("Production vehicle pipeline glass ray: %f %f %f weight %f; velocity %f %f %f %f\n",ray[0],ray[1],ray[2],ray[3],vel[0],vel[1],vel[2],vel[3]);fflush(stdout);
++ float before[4],after[4];glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(32,32,1,1,GL_RGBA,GL_FLOAT,before);regtaResolveRenderScale();glBindFramebuffer(GL_FRAMEBUFFER,fbo);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(32,32,1,1,GL_RGBA,GL_FLOAT,after);printf("Full renderer reflection blend before %f %f %f after %f %f %f\n",before[0],before[1],before[2],after[0],after[1],after[2]);fflush(stdout);assert(ray[3]>.06f && after[0]>after[1]+.045f);
++ glBindFramebuffer(GL_FRAMEBUFFER,0);camera->endUpdate();windowFixtureFinish();
++ 
++ geo->lock(Geometry::LOCKALL);if(standard)for(int i=0;i<3;i++)geo->morphTargets[0].vertices[i].z=5+9.94987f*geo->morphTargets[0].vertices[i].x;for(int i=0;i<3;i++)geo->morphTargets[0].normals[i]={.994987f,0,-.1f};geo->unlock();
++ for(int enabled:{1,0}){
++  regtaGfxRTGlass=enabled;camera->clear(&clear,Camera::CLEARIMAGE|Camera::CLEARZ);camera->beginUpdate();glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,(GLint*)&fbo);atomic->render();mtlglResolveSceneMSAA(fbo);
++  glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(standard?30:32,32,1,1,GL_RGBA,GL_FLOAT,ray);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(standard?30:32,32,1,1,GL_RGBA,GL_FLOAT,before);
++  regtaResolveRenderScale();glBindFramebuffer(GL_FRAMEBUFFER,fbo);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(standard?30:32,32,1,1,GL_RGBA,GL_FLOAT,after);
++  printf("Grazing pane enabled %d: reflection weight %.5f RGB difference %.5f\n",enabled,ray[3],after[0]-after[1]);fflush(stdout);
++  if(enabled){assert(ray[3]>(standard?.08f:.4f));assert(after[0]>after[1]+(standard?.045f:.15f));}else{assert(ray[3]==0);for(int c=0;c<3;c++)assert(fabsf(after[c]-before[c])<.0001f);}
++  glBindFramebuffer(GL_FRAMEBUFFER,0);camera->endUpdate();windowFixtureFinish();
++ }
++ puts("PASS production vehicle material, MSAA resolve, reduced-resolution ray trace and current-frame blend: head-on/grazing reflections visible; glass Off restores unreflected cabin contribution.");fflush(stdout);_Exit(0);
++}
+diff --git a/tools-mtl/window-pipeline-headless.inc b/tools-mtl/window-pipeline-headless.inc
+new file mode 100644
+index 00000000..2dd3d384
+--- /dev/null
++++ b/tools-mtl/window-pipeline-headless.inc
+@@ -0,0 +1,24 @@
++// Appended only to the test copy of gl3device.cpp. Production renderer functions remain unchanged.
++namespace rw { namespace gl3 {
++static int fixtureSystem(DeviceReq req,void*,int32){
++ if(req==DEVICEINIT){
++  if(!mtlglInit(nullptr,64,64) || !gladLoadGLLoader((GLADloadproc)mtlglGetProcAddress,33))return 0;
++  gl3Caps.gles=false;gl3Caps.glversion=33;gUseTarget=true;gNeedVel=true;gRenderScale=1;gRT=true;gRTStrength=.5f;gTemporal=true;
++  return initOpenGL();
++ }
++ if(req==DEVICEFINALIZE)return finalizeOpenGL();
++ return 1;
++}
++extern "C" void windowFixtureDevice(){renderdevice.system=fixtureSystem;}
++extern "C" void windowFixtureTargets(Camera *camera){
++ rsCamera=camera;rsW=rsH=rsOutW=rsOutH=64;
++ auto *native=PLUGINOFFSET(Gl3Raster,camera->frameBuffer,nativeRasterOffset);rsMakeTex(&rsFbo,&rsTex,64,64);native->fbo=rsFbo;native->texid=rsTex;gScaledFrame=true;
++ glGenTextures(1,&rsVelTex);glBindTexture(GL_TEXTURE_2D,rsVelTex);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA32F,64,64,0,GL_RGBA,GL_FLOAT,nullptr);
++ glGenTextures(1,&rsReflTex);glBindTexture(GL_TEXTURE_2D,rsReflTex);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,64,64,0,GL_RGBA,GL_HALF_FLOAT,nullptr);
++ glBindFramebuffer(GL_FRAMEBUFFER,rsFbo);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT1,GL_TEXTURE_2D,rsVelTex,0);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT2,GL_TEXTURE_2D,rsReflTex,0);
++ rsMakeTex(&rsUpFbo,&rsUpTex,64,64);glBindFramebuffer(GL_FRAMEBUFFER,rsFbo);currentFramebuffer=rsFbo;
++}
++extern "C" void windowFixtureFinish(){
++ PLUGINOFFSET(Gl3Raster,rsCamera->frameBuffer,nativeRasterOffset)->fbo=rsFbo;gScaledFrame=true;gSceneFrameStart=perfNow();if(gJitterApplied)memcpy(gPrevVP,gCurVP,sizeof(gPrevVP));gJitterApplied=false;gFrameIdx++;
++}
++}}
 diff --git a/tools/build_freeroam_map.py b/tools/build_freeroam_map.py
 new file mode 100644
 index 00000000..cb86d14f
@@ -18650,6 +18761,33 @@ index 00000000..f30ff759
 +  key,value=line.split(' = ',1);flags[key]=value
 +subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-I'+str(root/'vendor/librw/src/mtl'),'-std=c++17','-c',str(root/'tools-mtl/vehicle-glass-test.cpp'),'-o','/tmp/revc-glass-test.o'],check=True)
 +cmd=shlex.split((base/'link.txt').read_text());cmd[cmd.index('-o')+1]='/tmp/revc-glass-test';cmd+=['/tmp/revc-glass-test.o','-Wl,-e,_revcVehicleGlassTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run(['/tmp/revc-glass-test'],check=True,cwd=root)
+diff --git a/tools/run_vehicle_window_pipeline_test.py b/tools/run_vehicle_window_pipeline_test.py
+new file mode 100644
+index 00000000..8983f3e1
+--- /dev/null
++++ b/tools/run_vehicle_window_pipeline_test.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-vehicle-window-pipeline-test.o';exe=f'/tmp/{target}-vehicle-window-pipeline-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-I'+str(root/'vendor/librw/src/mtl'),'-std=c++17','-c',str(root/'tools-mtl/vehicle-window-pipeline-test.cpp'),'-o',obj],check=True)
++headless=Path(f'/tmp/{target}-window-device.cpp')
++# Use an offscreen camera texture, but retain the production main-camera matrices and jitter.
++# The appended fixture supplies targets without opening a GLFW window or changing product code.
++headless.write_text((root/'vendor/librw/src/gl/gl3device.cpp').read_text().replace('cam->frameBuffer->parent->type == Raster::CAMERA &&', 'cam->frameBuffer->parent->type == Raster::CAMERATEXTURE &&')+'\n'+(root/'tools-mtl/window-pipeline-headless.inc').read_text())
++device_obj=f'/tmp/{target}-window-device.o'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-std=c++17','-c',str(headless),'-o',device_obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd[cmd.index('-o')+1]=exe;cmd += [obj,device_obj,'-Wl,-e,_windowPipelineTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');
++import tempfile
++with tempfile.TemporaryDirectory() as fixture_dir:
++ Path(fixture_dir,target+'.ini').write_text('[Graphics]\nRetina=0\nRenderRT=1\nRenderRTStrength=0.5\n')
++ for args in [[],['--standard']]:
++  subprocess.run([exe,*args],check=True,cwd=fixture_dir,env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
 diff --git a/tools/test_cabin_intrusion.cpp b/tools/test_cabin_intrusion.cpp
 new file mode 100644
 index 00000000..4ef636eb
