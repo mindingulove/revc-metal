@@ -171,7 +171,7 @@ index 671948f..0ee725e 100644
  	D3dRaster *ras;
  	if(compression){
 diff --git a/src/gl/gl3device.cpp b/src/gl/gl3device.cpp
-index 5275fe5..58f11dd 100644
+index 5275fe5..3fa594d 100644
 --- a/src/gl/gl3device.cpp
 +++ b/src/gl/gl3device.cpp
 @@ -1,7 +1,13 @@
@@ -408,7 +408,7 @@ index 5275fe5..58f11dd 100644
  	}
  }
  
-@@ -672,6 +847,38 @@ evictRaster(Raster *raster)
+@@ -672,6 +847,39 @@ evictRaster(Raster *raster)
  	}
  }
  
@@ -417,6 +417,7 @@ index 5275fe5..58f11dd 100644
 +static float gRTGlassStrength = 0.5f;	// RenderRTGlassStrength
 +extern "C" int8_t regtaGfxRTGlass;
 +extern "C" int regtaRTVehicleOwner(void *clump);
++extern "C" int regtaRTReflectionsActive(void);
 +extern "C" float regtaVehicleGlassStrength(void){return gRTGlass && regtaGfxRTGlass ? std::max(0.f,std::min(2.f,2.f*gRTGlassStrength)) : 0.f;}
 +bool32
 +setGlassForTexture(Texture *tex)
@@ -441,13 +442,13 @@ index 5275fe5..58f11dd 100644
 +	}
 +	float g[4] = { v*gRTGlassStrength, (float)regtaRTVehicleOwner(regtaRTVehicleClump), regtaRTVehicle ? 1.f : 0.f, 0.0f };
 +	setUniform(u_glassRefl, g);
-+	return gRT && v > 0.0f;
++	return regtaRTReflectionsActive() && v > 0.0f;
 +}
 +
  void
  setTexture(int32 stage, Texture *tex)
  {
-@@ -988,6 +1195,82 @@ setWorldMatrix(Matrix *mat)
+@@ -988,6 +1196,82 @@ setWorldMatrix(Matrix *mat)
  	convMatrix(&uniformObject.world, mat);
  	setUniform(u_world, &uniformObject.world);
  	objectDirty = 1;
@@ -530,7 +531,7 @@ index 5275fe5..58f11dd 100644
  }
  
  int32
-@@ -1193,6 +1476,90 @@ flushCache(void)
+@@ -1193,6 +1477,90 @@ flushCache(void)
  	flushUniforms();
  }
  
@@ -621,7 +622,7 @@ index 5275fe5..58f11dd 100644
  static void
  setFrameBuffer(Camera *cam)
  {
-@@ -1204,6 +1571,15 @@ setFrameBuffer(Camera *cam)
+@@ -1204,6 +1572,15 @@ setFrameBuffer(Camera *cam)
  	Gl3Raster *natzb = PLUGINOFFSET(Gl3Raster, zbuf, nativeRasterOffset);
  	assert(fbuf->type == Raster::CAMERA || fbuf->type == Raster::CAMERATEXTURE);
  
@@ -637,7 +638,7 @@ index 5275fe5..58f11dd 100644
  	// Have to make sure depth buffer is attached to FB's fbo
  	bindFramebuffer(natfb->fbo);
  	if(zbuf){
-@@ -1236,6 +1612,42 @@ setFrameBuffer(Camera *cam)
+@@ -1236,6 +1613,42 @@ setFrameBuffer(Camera *cam)
  			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
  		natfb->fboMate = nil;
  	}
@@ -680,7 +681,7 @@ index 5275fe5..58f11dd 100644
  }
  
  static Rect
-@@ -1250,23 +1662,47 @@ getFramebufferRect(Raster *frameBuffer)
+@@ -1250,23 +1663,47 @@ getFramebufferRect(Raster *frameBuffer)
  		SDL_GetWindowSize(glGlobals.window, &r.w, &r.h);
  #elif defined(LIBRW_GLFW)
  		glfwGetFramebufferSize(glGlobals.window, &r.w, &r.h);
@@ -734,7 +735,7 @@ index 5275fe5..58f11dd 100644
  	}
  
  	return r;
-@@ -1286,10 +1722,1577 @@ setViewport(Raster *frameBuffer)
+@@ -1286,10 +1723,1577 @@ setViewport(Raster *frameBuffer)
  	}
  }
  
@@ -2312,7 +2313,7 @@ index 5275fe5..58f11dd 100644
  	// View Matrix
  	Matrix inv;
  	Matrix::invert(&inv, cam->getFrame()->getLTM());
-@@ -1347,6 +3350,36 @@ beginUpdate(Camera *cam)
+@@ -1347,6 +3351,36 @@ beginUpdate(Camera *cam)
  		proj[15] = 1.0f;
  	}
  	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
@@ -2349,7 +2350,7 @@ index 5275fe5..58f11dd 100644
  	setProjectionMatrix(proj);
  
  	if(rwStateCache.fogStart != cam->fogPlane){
-@@ -1397,6 +3430,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1397,6 +3431,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  	if(mode & Camera::CLEARSTENCIL)
  		mask |= GL_STENCIL_BUFFER_BIT;
  	glDepthMask(GL_TRUE);
@@ -2370,7 +2371,7 @@ index 5275fe5..58f11dd 100644
  	glClear(mask);
  	glDepthMask(rwStateCache.zwrite);
  
-@@ -1404,9 +3451,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1404,9 +3452,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  		glDisable(GL_SCISSOR_TEST);
  }
  
@@ -2383,7 +2384,7 @@ index 5275fe5..58f11dd 100644
  //	glViewport(raster->offsetX, raster->offsetY,
  //		raster->width, raster->height);
  
-@@ -1423,11 +3473,94 @@ showRaster(Raster *raster, uint32 flags)
+@@ -1423,11 +3474,94 @@ showRaster(Raster *raster, uint32 flags)
  		SDL_GL_SetSwapInterval(0);
  	SDL_GL_SwapWindow(glGlobals.window);
  #elif defined(LIBRW_GLFW)
@@ -2482,7 +2483,7 @@ index 5275fe5..58f11dd 100644
  #else
  	not implemented
  #endif
-@@ -1449,8 +3582,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
+@@ -1449,8 +3583,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
  		case Raster::CAMERA:
  			setActiveTexture(0);
  			glBindTexture(GL_TEXTURE_2D, natdst->texid);
@@ -2496,7 +2497,7 @@ index 5275fe5..58f11dd 100644
  			glBindTexture(GL_TEXTURE_2D, boundTexture[0]);
  			return 1;
  		}
-@@ -1885,6 +4021,8 @@ static struct {
+@@ -1885,6 +4022,8 @@ static struct {
  	{ 0, 0, 0 },
  };
  
@@ -2505,7 +2506,7 @@ index 5275fe5..58f11dd 100644
  static int
  startGLFW(void)
  {
-@@ -1894,6 +4032,124 @@ startGLFW(void)
+@@ -1894,6 +4033,124 @@ startGLFW(void)
  	mode = &glGlobals.modes[glGlobals.currentMode];
  
  	glfwSetErrorCallback(glfwerr);
@@ -2630,7 +2631,7 @@ index 5275fe5..58f11dd 100644
  	glfwWindowHint(GLFW_RED_BITS, mode->mode.redBits);
  	glfwWindowHint(GLFW_GREEN_BITS, mode->mode.greenBits);
  	glfwWindowHint(GLFW_BLUE_BITS, mode->mode.blueBits);
-@@ -1905,10 +4161,31 @@ startGLFW(void)
+@@ -1905,10 +4162,31 @@ startGLFW(void)
  		glfwWindowHint(GLFW_SAMPLES, glGlobals.numSamples);
  
  	int i;
@@ -2662,7 +2663,7 @@ index 5275fe5..58f11dd 100644
  
  		if(mode->flags & VIDEOMODEEXCLUSIVE)
  			win = glfwCreateWindow(mode->mode.width, mode->mode.height, glGlobals.winTitle, glGlobals.monitor, nil);
-@@ -1924,6 +4201,22 @@ startGLFW(void)
+@@ -1924,6 +4202,22 @@ startGLFW(void)
  		RWERROR((ERR_GENERAL, "glfwCreateWindow() failed"));
  		return 0;
  	}
@@ -2685,7 +2686,7 @@ index 5275fe5..58f11dd 100644
  	glfwMakeContextCurrent(win);
  
  	/* Init GLAD */
-@@ -1932,8 +4225,14 @@ startGLFW(void)
+@@ -1932,8 +4226,14 @@ startGLFW(void)
  		glfwDestroyWindow(win);
  		return 0;
  	}
@@ -2701,7 +2702,7 @@ index 5275fe5..58f11dd 100644
  
  	glGlobals.window = win;
  	*glGlobals.pWindow = win;
-@@ -1975,6 +4274,7 @@ initOpenGL(void)
+@@ -1975,6 +4275,7 @@ initOpenGL(void)
  */
  	gl3Caps.dxtSupported = !!GLAD_GL_EXT_texture_compression_s3tc;
  	gl3Caps.astcSupported = !!GLAD_GL_KHR_texture_compression_astc_ldr;
@@ -2709,7 +2710,7 @@ index 5275fe5..58f11dd 100644
  
  	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &gl3Caps.maxAnisotropy);
  
-@@ -2009,6 +4309,7 @@ initOpenGL(void)
+@@ -2009,6 +4310,7 @@ initOpenGL(void)
  	registerBlock("State");
  #endif
  	u_matColor = registerUniform("u_matColor", UNIFORM_VEC4);
@@ -2717,7 +2718,7 @@ index 5275fe5..58f11dd 100644
  	u_surfProps = registerUniform("u_surfProps", UNIFORM_VEC4);
  
  	// for im2d
-@@ -2060,10 +4361,10 @@ initOpenGL(void)
+@@ -2060,10 +4362,10 @@ initOpenGL(void)
  
  #include "shaders/default_vs_gl.inc"
  #include "shaders/simple_fs_gl.inc"
