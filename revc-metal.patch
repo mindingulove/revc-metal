@@ -341,6 +341,25 @@ index 00000000..ac30673f
 +Temporal AA now validates reprojected depth and signed actor identity rather than rejecting all dynamic pixels. Matching car/pedestrian surfaces retain history, newly exposed background rejects stale actor pixels, and moving shadows reject history only where coverage changes. Large changes of reflected radiance receive partial reactivity. Previous bone poses supply animated limb motion. Spatial edge AA remains limited to rejected/disoccluded pixels. Native Metal MSAA independently provides 2x/4x geometry coverage before RT and MetalFX; the nearest depth sample supplies intact motion/owner tags, and reflection weights account for partial coverage. See METAL_MSAA_AND_TEMPORAL_AA.md for validation and limits.
 +
 +Advanced graphics now exposes "RT reflection/shadow resolution": 100%, 50%, or 25% of scene width and height. These correspond to one ray sample per 1x1, 2x2, or 4x4 scene block. Changes apply on the next frame, rebuild RT targets and invalidate temporal history. `RenderRTResolutionIdx=0/1/2` persists the selection and takes precedence over the legacy `RenderRTHalfRes` key regardless of INI order. Default is 100%. Lower choices affect the shared reflection/shadow/AO/light tracing grid, not just cars. Texture compression cannot replace this ray-count tradeoff.
+diff --git a/docs/REFLECTION_FIXES.md b/docs/REFLECTION_FIXES.md
+new file mode 100644
+index 00000000..28613c62
+--- /dev/null
++++ b/docs/REFLECTION_FIXES.md
+@@ -0,0 +1,13 @@
++# Reflection receiver and frame consistency fixes
++
++2026-10-18. Implemented in both GTA III and Vice City Metal sources.
++
++Vehicle shaders now write their own fragment depth into the negative alpha of the motion/owner target. Reflection rays reconstruct their origin from that depth, rather than an opaque seat or pedestrian behind a transparent pane. The target is RGBA32F so depth precision near the far plane and vehicle owner IDs are retained. Motion, owner identity and MSAA coverage remain available; temporal classification accepts the new car tag and the legacy tags. Shadow/AO receivers still use opaque depth.
++
++Wet roads and static glass now receive the current frame's reflection after scene geometry and diffuse lighting. Ground materials no longer mix an unvalidated previous reflection image into the scene. This removes that source of stale foreground silhouettes and avoids sampling reflected colour back into later reflection shading. Material weights are preserved, and characters do not receive a reflection coat.
++
++No render scale, Retina setting, reflection resolution, trace distance, mesh detail, ray count, MSAA setting or temporal smoothing setting is reduced. RGBA32F metadata adds eight bytes per pixel compared with RGBA16F, including multisample storage. This is a correctness/precision cost, not a claimed free speedup. Old road reflection lookups are removed. The dynamic TLAS refit and sun integration recurrence preserve the same geometry and samples; neither establishes a gameplay FPS gain without measurement.
++
++Validation: production Metal reflection kernel distinguishes a pane from the opaque depth behind it; current-frame composite tests wet road/static glass/car/ped regions and immediate radiance changes; MSAA 1/2/4 tests preserve exact owners 7001/7002 and negative pane depths across encoder breaks, plus 8/16 capability fallback and resize; temporal reactive tests preserve stationary/moving car history and reject disocclusions. Vice City's actual vehicle shader tests preserve pane transmission, livery and paint behaviour. Both native builds pass.
++
++Gameplay acceptance remains open: inspect clean and damaged windshields, occupants, wet-road motion, transparent layering and frame cost in both games. These tests do not establish that every blue window or every source of ghosting is fixed. The legacy trails setting and temporal reconstruction can independently affect the image.
 diff --git a/docs/SUN_RAYS_AND_MSAA.md b/docs/SUN_RAYS_AND_MSAA.md
 new file mode 100644
 index 00000000..99b35cf4
@@ -10138,10 +10157,10 @@ index 00000000..5508af16
 +}
 diff --git a/src/extras/metalfx/MetalFXBridge.cpp b/src/extras/metalfx/MetalFXBridge.cpp
 new file mode 100644
-index 00000000..ca1020d8
+index 00000000..db444f23
 --- /dev/null
 +++ b/src/extras/metalfx/MetalFXBridge.cpp
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,270 @@
 +// Objective-C++ (compiled with -x objective-c++, see src/CMakeLists.txt)
 +#define GL_SILENCE_DEPRECATION
 +#import <Foundation/Foundation.h>
@@ -10152,6 +10171,8 @@ index 00000000..ca1020d8
 +#import <OpenGL/CGLIOSurface.h>
 +#import <OpenGL/gl3.h>
 +#include <stdio.h>
++#include <atomic>
++#include <cstdint>
 +#include "MetalFXBridge.h"
 +#ifdef RW_METALGL
 +#include "src/mtl/mtlgl.h"
@@ -10159,6 +10180,7 @@ index 00000000..ca1020d8
 +
 +
 +namespace {
++static std::atomic<uint64_t> &lastGpuNs=*new std::atomic<uint64_t>(0);
 +
 +struct State {
 +	id<MTLDevice> device;
@@ -10352,6 +10374,10 @@ index 00000000..ca1020d8
 +		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 +		[blit copyFromTexture:S.outputPrivate toTexture:S.metal[MFX_OUTPUT]];
 +		[blit endEncoding];
++        [cb addCompletedHandler:^(id<MTLCommandBuffer> done){
++            if(done.status==MTLCommandBufferStatusCompleted && done.GPUEndTime>=done.GPUStartTime)
++                lastGpuNs.store((uint64_t)((done.GPUEndTime-done.GPUStartTime)*1.0e9),std::memory_order_relaxed);
++        }];
 +		[cb commit];
 +  S.pending[slot]=cb;
 +#ifdef RW_METALGL
@@ -10403,6 +10429,8 @@ index 00000000..ca1020d8
 +		S.device = nil;
 +	}
 +}
++
++extern "C" float mfxGpuMilliseconds(void){return (float)(lastGpuNs.load(std::memory_order_relaxed)/1.0e6);}
 diff --git a/src/extras/metalfx/MetalFXBridge.h b/src/extras/metalfx/MetalFXBridge.h
 new file mode 100644
 index 00000000..39981a79
@@ -10432,10 +10460,10 @@ index 00000000..39981a79
 +#endif
 diff --git a/src/extras/metalfx/MetalRT.cpp b/src/extras/metalfx/MetalRT.cpp
 new file mode 100644
-index 00000000..0421d0f3
+index 00000000..d93fcb68
 --- /dev/null
 +++ b/src/extras/metalfx/MetalRT.cpp
-@@ -0,0 +1,1390 @@
+@@ -0,0 +1,1428 @@
 +// Objective-C++ (compiled with -x objective-c++, see src/CMakeLists.txt)
 +#define GL_SILENCE_DEPRECATION
 +#import <Foundation/Foundation.h>
@@ -10445,6 +10473,8 @@ index 00000000..0421d0f3
 +#import <OpenGL/CGLIOSurface.h>
 +#import <OpenGL/gl3.h>
 +#include <stdio.h>
++#include <atomic>
++#include <cstdint>
 +#include <string.h>
 +#include <stdlib.h>
 +#include <vector>
@@ -10458,6 +10488,7 @@ index 00000000..0421d0f3
 +
 +
 +namespace {
++static std::atomic<uint64_t> &lastGpuNs=*new std::atomic<uint64_t>(0);
 +
 +const char *kernelSource = R"MSL(
 +#include <metal_stdlib>
@@ -10494,6 +10525,7 @@ index 00000000..0421d0f3
 +	texture2d<float, access::write> outTex [[texture(2)]],
 +	texture2d<float, access::read> sceneColour [[texture(3)]],
 +	texture2d<float, access::read> sceneDepth [[texture(4)]],
++	texture2d<float, access::read> sceneVelocity [[texture(5)]],
 +	instance_acceleration_structure staticScene [[buffer(0)]],
 +	instance_acceleration_structure dynamicScene [[buffer(1)]],
 +	constant Uniforms &u [[buffer(2)]],
@@ -10514,6 +10546,12 @@ index 00000000..0421d0f3
 +	}
 +	float depth = depthTex.read(gid).r;
 +	float2 uv = depthTex.read(gid).gb;
++	if(u.pad6 != 0){
++		uint2 receiverPixel = min(uint2(uv*float2(sceneVelocity.get_width(), sceneVelocity.get_height())),
++		                         uint2(sceneVelocity.get_width()-1, sceneVelocity.get_height()-1));
++		float paneDepth = sceneVelocity.read(receiverPixel).a;
++		if(paneDepth < 0.0f && paneDepth >= -1.0f) depth = -paneDepth;
++	}
 +	float4 w = u.invVP*float4(uv*2.0f - 1.0f, depth*2.0f - 1.0f, 1.0f);
 +	float3 pos = w.xyz/w.w;
 +	float3 dir = normalize(rd.xyz);
@@ -10676,14 +10714,16 @@ index 00000000..0421d0f3
 + float phase=(1.0f-g*g)/(12.5663706f*denom*sqrt(denom));
 + intersector<triangle_data, instancing> inter;
 + inter.assume_geometry_type(geometry_type::triangle); inter.accept_any_intersection(true);
-+ float scattering=0.0f;
++ float scattering=0.0f, transmission=1.0f;
++ float stepTransmission=exp(-sigma*ds), stepScattering=1.0f-stepTransmission;
 + for(uint k=0;k<steps;k++){
 +  ray r;
 +  r.origin=float3(u.camera)+viewDir*((float(k)+0.5f)*ds);
 +  r.direction=normalize(float3(u.toSun)); r.min_distance=0.03f; r.max_distance=250.0f;
 +  bool blocked=inter.intersect(r,staticScene,0x04).type == intersection_type::triangle;
 +  if(!blocked && u.hasDynamic) blocked=inter.intersect(r,dynamicScene,0x04).type == intersection_type::triangle;
-+  if(!blocked) scattering += exp(-sigma*float(k)*ds)*(1.0f-exp(-sigma*ds));
++  if(!blocked) scattering += transmission*stepScattering;
++  transmission *= stepTransmission;
 + }
 + float opacity=1.0f-exp(-sigma*limit);
 + float3 light=max(float3(u.sunColor),0.0f)*clamp(u.sunVisibility,0.0f,1.0f)*phase*scattering;
@@ -11006,7 +11046,9 @@ index 00000000..0421d0f3
 +	std::vector<uint32_t> firstColour;
 +	struct GeometryAS { int first, second, volume; GeometryAS(int a=-1,int b=-1,int c=-1):first(a),second(b),volume(c){} };
 +	std::vector<GeometryAS> geoms;	// geometry id -> main acceleration structure, shadow-only structure (-1 if none)
-+	std::vector<int> staticUsed, dynamicUsed;	// bottom-level structures the scenes reference (the only ones that must be resident)
++	std::vector<int> dynamicOrder;
++ uint32_t lastDynamicBuild=0; uint64_t dynamicBuilds=0,dynamicRefits=0;
++ std::vector<int> staticUsed, dynamicUsed;	// bottom-level structures the scenes reference (the only ones that must be resident)
 +	bool replaceColourBuffer; // changing a recycled actor must not overwrite colours still read by an in-flight frame
 +	size_t uploadedColours, uploadedFirst;	// how much of the colour tables the GPU buffers already hold
 +	std::vector<uint8_t> geomMask;	// instance mask per geometry: bit 0 = seen by reflection rays, bit 1 = casts shadows
@@ -11149,7 +11191,7 @@ index 00000000..0421d0f3
 +
 +// builds an instance acceleration structure over the given instances; geomOut receives the per-instance geometry ids
 +id<MTLAccelerationStructure>
-+buildScene(const std::vector<std::pair<int, const float*>> &inst, id<MTLBuffer> __strong *geomBuf, std::vector<int> &used, const std::vector<uint32_t> *owners = nullptr, const std::vector<std::array<uint32_t,2>> *paints = nullptr)
++buildScene(const std::vector<std::pair<int, const float*>> &inst, id<MTLBuffer> __strong *geomBuf, std::vector<int> &used, const std::vector<uint32_t> *owners = nullptr, const std::vector<std::array<uint32_t,2>> *paints = nullptr, id<MTLAccelerationStructure> previous = nil, bool dynamic = false)
 +{
 +	used.clear();
 +	if(inst.empty()) return nil;
@@ -11183,8 +11225,19 @@ index 00000000..0421d0f3
 +	d.instancedAccelerationStructures = list;
 +	d.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeDefault;
 +	[S.tempBuffers addObject:descBuf];
-+	id<MTLAccelerationStructure> as = buildStructure(d);
-+	return as;
++ if(dynamic) d.usage=MTLAccelerationStructureUsageRefit;
++ id<MTLAccelerationStructure> as=nil;
++ if(dynamic && previous){
++  auto sizes=[S.device accelerationStructureSizesWithDescriptor:d];
++  NSUInteger bytes=MAX(sizes.accelerationStructureSize,previous.size);
++  if(S.gpuBytes+bytes<=kMaxGpuBytes){
++   as=[S.device newAccelerationStructureWithSize:bytes];
++   auto scratch=[S.device newBufferWithLength:MAX(sizes.refitScratchBufferSize,(NSUInteger)16) options:MTLResourceStorageModePrivate];
++   if(as && scratch){openBuild();[S.buildEnc refitAccelerationStructure:previous descriptor:d destination:as scratchBuffer:scratch scratchBufferOffset:0];[S.tempBuffers addObject:scratch];S.gpuBytes+=bytes;S.dynamicRefits++;}
++   else as=nil;
++  }
++ }else {as=buildStructure(d);if(dynamic && as)S.dynamicBuilds++;}
++ return as;
 +}
 +
 +}
@@ -11619,7 +11672,12 @@ index 00000000..0421d0f3
 +				if(S.geoms[d.geom].second >= 0){ inst.push_back({ S.geoms[d.geom].second, d.m }); owners.push_back(d.owner); paints.push_back({d.primary,d.secondary}); }
 +				if(S.geoms[d.geom].volume >= 0){ inst.push_back({ S.geoms[d.geom].volume, d.m }); owners.push_back(d.owner); paints.push_back({d.primary,d.secondary}); }
 +			}
-+			id<MTLAccelerationStructure> as = buildScene(inst, &S.dynamicGeomBuf, S.dynamicUsed, &owners, &paints);
++			std::vector<int> order;order.reserve(inst.size());for(const auto &i:inst)order.push_back(i.first);
++            // Refit only an unchanged instance/geometry layout. Refresh the tree periodically
++            // to avoid progressively worse traversal as traffic moves. No meshes or rays are removed.
++            bool refit=S.dynamicTLAS && order==S.dynamicOrder && S.frame-S.lastDynamicBuild<30;
++            id<MTLAccelerationStructure> as = buildScene(inst, &S.dynamicGeomBuf, S.dynamicUsed, &owners, &paints,refit?S.dynamicTLAS:nil,true);
++            if(as){S.dynamicOrder=std::move(order);if(!refit)S.lastDynamicBuild=S.frame;}
 +			closeBuild(false);
 +			if(as){ if(S.dynamicTLAS) S.gpuBytes -= S.dynamicTLAS.size; S.dynamicTLAS = as; haveDynamic = true; }
 +		}
@@ -11712,12 +11770,14 @@ index 00000000..0421d0f3
 +		[enc setAccelerationStructure:S.staticTLAS atBufferIndex:0];
 +		[enc setAccelerationStructure:(haveDynamic ? S.dynamicTLAS : S.staticTLAS) atBufferIndex:1];
 +		auto reflectionUniforms=u;
++		reflectionUniforms.pad6=S.sceneVelocity ? 1 : 0;
 +		reflectionUniforms.pad8=S.sceneColour && S.sceneDepth ? 1 : 0;
 +		reflectionUniforms.pad7=S.surfaceEncoder && S.surfaceBuffer && !S.surfaces.empty() ? 1 : 0;
 +		memcpy(reflectionUniforms.prevVP,S.prevVP,64);
 +		[enc setBytes:&reflectionUniforms length:sizeof(reflectionUniforms) atIndex:2];
 +		[enc setTexture:(S.sceneColour ? S.sceneColour : S.tex[MRT_DEPTH]) atIndex:3];
 +		[enc setTexture:(S.sceneDepth ? S.sceneDepth : S.tex[MRT_DEPTH]) atIndex:4];
++		[enc setTexture:(S.sceneVelocity ? S.sceneVelocity : S.tex[MRT_DEPTH]) atIndex:5];
 +		[enc setBuffer:S.colourBuf offset:0 atIndex:3];
 +		[enc setBuffer:S.firstColourBuf offset:0 atIndex:4];
 +		[enc setBuffer:(S.surfaceBuffer ? S.surfaceBuffer : S.firstColourBuf) offset:0 atIndex:8];
@@ -11758,6 +11818,10 @@ index 00000000..0421d0f3
 +            [enc dispatchThreads:MTLSizeMake((S.width+3)/4,(S.height+3)/4,1) threadsPerThreadgroup:group];
 +        }
 +		[enc endEncoding];
++        [cb addCompletedHandler:^(id<MTLCommandBuffer> done){
++            if(done.status==MTLCommandBufferStatusCompleted && done.GPUEndTime>=done.GPUStartTime)
++                lastGpuNs.store((uint64_t)((done.GPUEndTime-done.GPUStartTime)*1.0e9),std::memory_order_relaxed);
++        }];
 +		[cb commit];
 +		if(capture){
 +			remove("rt_probe");
@@ -11826,6 +11890,8 @@ index 00000000..0421d0f3
 +	if(count > 32) count = 32;
 +	S.lights.assign(data, data + count*8);
 +}
++
++extern "C" float mrtGpuMilliseconds(void){return (float)(lastGpuNs.load(std::memory_order_relaxed)/1.0e6);}
 diff --git a/src/extras/metalfx/MetalRT.h b/src/extras/metalfx/MetalRT.h
 new file mode 100644
 index 00000000..e5792e0c
@@ -13609,7 +13675,7 @@ index 1515ad71..f99560f2 100644
  
  	v_tex0 = in_tex0;
 diff --git a/src/extras/shaders/neoVehicle.frag b/src/extras/shaders/neoVehicle.frag
-index 2ac24f70..0958661e 100644
+index 2ac24f70..279e1a14 100644
 --- a/src/extras/shaders/neoVehicle.frag
 +++ b/src/extras/shaders/neoVehicle.frag
 @@ -1,22 +1,185 @@
@@ -13802,13 +13868,16 @@ index 2ac24f70..0958661e 100644
  
  	vec4 color;
  	color.rgb = pass1.rgb*pass1.a + pass2;
-@@ -25,5 +188,12 @@ main(void)
+@@ -25,5 +188,15 @@ main(void)
  //	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);
  	DoAlphaTest(color.a);
  
 +	WRITE_VEL();
 +#if defined(HAS_VEL_OUT) && defined(VEL_PIPE)
 +	velOut.b = -u_reflectionOwner;
++	// Negative alpha identifies a car and stores the actual pane/panel depth.
++	// The opaque depth buffer can belong to an occupant behind transparent glass.
++	velOut.a = -max(gl_FragCoord.z, 1.0e-8);
 +#endif
 +#ifdef REFL_OUT
 +	reflOut = vec4(reflected*0.5 + 0.5, reflectionWeight);	// direction*0.5+0.5, weight (stored at half-float precision)
@@ -13984,28 +14053,27 @@ index 7cd199d0..ad81d0c4 100644
  
  "	v_tex0 = in_tex0;\n"
 diff --git a/src/extras/shaders/obj/neoVehicle_frag.inc b/src/extras/shaders/obj/neoVehicle_frag.inc
-index 20537440..bb728715 100644
+index 20537440..6c51f7d0 100644
 --- a/src/extras/shaders/obj/neoVehicle_frag.inc
 +++ b/src/extras/shaders/obj/neoVehicle_frag.inc
-@@ -1,31 +1,201 @@
+@@ -1,23 +1,186 @@
  const char *neoVehicle_frag_src =
 +"#ifdef GL2\n"
 +"#define textureLod(s, c, l) texture(s, c)\n"
 +"#endif\n"
  "uniform sampler2D tex0;\n"
  "uniform sampler2D tex1;\n"
--
 +"uniform sampler2D ssrColor;\n"
 +"uniform sampler2D ssrDepth;\n"
 +"uniform mat4 u_ssrProj;\n"
 +"uniform mat4 u_ssrView;\n"
-+"uniform vec4 u_ssrVP;\t\t// viewport x, y, w, h (pixels)\n"
-+"uniform vec4 u_ssrTex;\t\t// capture size, mode: -1 ray tracing, 0 legacy, 1 screen space\n"
++"uniform vec4 u_ssrVP;		// viewport x, y, w, h (pixels)\n"
++"uniform vec4 u_ssrTex;		// capture size, mode: -1 ray tracing, 0 legacy, 1 screen space\n"
 +"uniform vec4 u_reflProps;\n"
 +"uniform float u_reflectionOwner;\n"
 +"uniform vec4 u_dirtProps; // coverage, stable seed, lower body Z, body height\n"
 +"uniform vec2 u_dirtAxles; // front/rear wheel Y in car space\n"
-+"\n"
+ 
  "FSIN vec4 v_color;\n"
 +"FSIN vec4 v_lighting;\n"
 +"uniform float u_liveryMode;\n"
@@ -14013,198 +14081,187 @@ index 20537440..bb728715 100644
  "FSIN vec2 v_tex0;\n"
  "FSIN vec2 v_tex1;\n"
  "FSIN float v_fog;\n"
--
 +"FSIN vec3 v_normal;\n"
 +"FSIN vec3 v_viewVec;\n"
 +"FSIN vec3 v_carPosition;\n"
 +"#ifdef REFL_OUT\n"
 +"layout(location = 2) out vec4 reflOut;\n"
 +"#endif\n"
-+"\n"
++
 +"vec2 ssrToTex(vec2 ndc)\n"
 +"{\n"
-+"\treturn (u_ssrVP.xy + (ndc*0.5 + 0.5)*u_ssrVP.zw)/u_ssrTex.xy;\n"
++"	return (u_ssrVP.xy + (ndc*0.5 + 0.5)*u_ssrVP.zw)/u_ssrTex.xy;\n"
 +"}\n"
-+"\n"
++
 +"float ssrEyeZ(float d)\n"
 +"{\n"
-+"\treturn u_ssrProj[3][2]/(d*2.0 - 1.0 - u_ssrProj[2][2]);\n"
++"	return u_ssrProj[3][2]/(d*2.0 - 1.0 - u_ssrProj[2][2]);\n"
 +"}\n"
-+"\n"
++
 +"// screen space reflection of the scene drawn so far; rgb = colour, a = confidence\n"
 +"// Marches the reflected ray in a few pixels per step (so thin things like poles and wires are not\n"
 +"// skipped), then refines the hit with a binary search.\n"
 +"vec4 ssrTrace(vec3 reflected)\n"
 +"{\n"
-+"\tvec3 R = mat3(u_ssrView)*reflected;\n"
-+"\tif(R.z < -0.1)\n"
-+"\t\treturn vec4(0.0);\t// pointing back at the camera, nothing on screen to hit\n"
-+"\tvec2 ndc0 = (gl_FragCoord.xy - u_ssrVP.xy)/u_ssrVP.zw*2.0 - 1.0;\n"
-+"\tfloat z0 = ssrEyeZ(gl_FragCoord.z);\n"
-+"\tvec3 P0 = vec3((ndc0.x*z0 - u_ssrProj[2][0]*z0 - u_ssrProj[3][0])/u_ssrProj[0][0],\n"
-+"\t               (ndc0.y*z0 - u_ssrProj[2][1]*z0 - u_ssrProj[3][1])/u_ssrProj[1][1], z0);\n"
-+"\n"
-+"\tfloat tmax = 90.0;\n"
-+"\tif(R.z < 0.0)\n"
-+"\t\ttmax = min(tmax, (0.3 - P0.z)/R.z*0.99);\n"
-+"\tvec3 P1 = P0 + R*tmax;\n"
-+"\tvec4 c0 = u_ssrProj*vec4(P0, 1.0);\n"
-+"\tvec4 c1 = u_ssrProj*vec4(P1, 1.0);\n"
-+"\tvec2 n1 = c1.xy/c1.w;\n"
-+"\tfloat k0 = 1.0/c0.w, k1 = 1.0/c1.w;\t\t// 1/z, linear in screen space\n"
-+"\n"
-+"\t// pixel length of the ray (clipped to the screen)\n"
-+"\tvec2 dn = n1 - ndc0;\n"
-+"\tvec2 over = max(abs(n1) - 1.0, 0.0)/max(abs(dn), vec2(1e-5));\n"
-+"\tfloat clipT = 1.0 - max(over.x, over.y);\n"
-+"\tif(clipT <= 0.0)\n"
-+"\t\treturn vec4(0.0);\n"
-+"\tvec2 dpx = dn*clipT*0.5*u_ssrVP.zw;\n"
-+"\tfloat pl = max(abs(dpx.x), abs(dpx.y));\n"
-+"\tif(pl < 1.5)\n"
-+"\t\treturn vec4(0.0);\n"
-+"\tfloat stride = max(2.0, pl/160.0);\n"
-+"\tint n = int(min(pl/stride, 160.0)) + 1;\n"
-+"\tfloat dt = clipT/float(n);\n"
-+"\tfloat jit = 0.25 + 0.75*fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
-+"\n"
-+"\tfloat tPrev = 0.0;\n"
-+"\tfor(int i = 0; i < 160; i++){\n"
-+"\t\tif(i >= n) break;\n"
-+"\t\tfloat t = dt*(float(i) + jit);\n"
-+"\t\tvec2 ndc = mix(ndc0, n1, t);\n"
-+"\t\tfloat z = 1.0/mix(k0, k1, t);\n"
-+"\t\tfloat sz = ssrEyeZ(textureLod(ssrDepth, ssrToTex(ndc), 0.0).r);\n"
-+"\t\tfloat diff = z - sz;\n"
-+"\t\tif(diff > 0.04 + 0.01*z && diff < 0.5 + 0.08*z){\n"
-+"\t\t\tfloat a = tPrev, b = t;\n"
-+"\t\t\tfor(int j = 0; j < 7; j++){\n"
-+"\t\t\t\tfloat m = (a + b)*0.5;\n"
-+"\t\t\t\tvec2 nm = mix(ndc0, n1, m);\n"
-+"\t\t\t\tfloat zm = 1.0/mix(k0, k1, m);\n"
-+"\t\t\t\tif(zm - ssrEyeZ(textureLod(ssrDepth, ssrToTex(nm), 0.0).r) > 0.0) b = m; else a = m;\n"
-+"\t\t\t}\n"
-+"\t\t\tvec2 nb = mix(ndc0, n1, b);\n"
-+"\t\t\tfloat zb = 1.0/mix(k0, k1, b);\n"
-+"\t\t\tfloat tw = abs(R.z) > 0.02 ? (zb - P0.z)/R.z : tmax*b;\n"
-+"\t\t\tvec2 e = 1.0 - abs(nb);\n"
-+"\t\t\tfloat edge = clamp(min(e.x, e.y)*6.0, 0.0, 1.0);\n"
-+"\t\t\tfloat facing = smoothstep(-0.1, 0.35, R.z);\n"
-+"\t\t\tfloat dist = 1.0 - clamp(tw/80.0, 0.0, 1.0);\n"
-+"\t\t\treturn vec4(textureLod(ssrColor, ssrToTex(nb), 0.0).rgb, edge*facing*dist);\n"
-+"\t\t}\n"
-+"\t\ttPrev = t;\n"
-+"\t}\n"
-+"\treturn vec4(0.0);\n"
++"	vec3 R = mat3(u_ssrView)*reflected;\n"
++"	if(R.z < -0.1)\n"
++"		return vec4(0.0);	// pointing back at the camera, nothing on screen to hit\n"
++"	vec2 ndc0 = (gl_FragCoord.xy - u_ssrVP.xy)/u_ssrVP.zw*2.0 - 1.0;\n"
++"	float z0 = ssrEyeZ(gl_FragCoord.z);\n"
++"	vec3 P0 = vec3((ndc0.x*z0 - u_ssrProj[2][0]*z0 - u_ssrProj[3][0])/u_ssrProj[0][0],\n"
++"	               (ndc0.y*z0 - u_ssrProj[2][1]*z0 - u_ssrProj[3][1])/u_ssrProj[1][1], z0);\n"
++
++"	float tmax = 90.0;\n"
++"	if(R.z < 0.0)\n"
++"		tmax = min(tmax, (0.3 - P0.z)/R.z*0.99);\n"
++"	vec3 P1 = P0 + R*tmax;\n"
++"	vec4 c0 = u_ssrProj*vec4(P0, 1.0);\n"
++"	vec4 c1 = u_ssrProj*vec4(P1, 1.0);\n"
++"	vec2 n1 = c1.xy/c1.w;\n"
++"	float k0 = 1.0/c0.w, k1 = 1.0/c1.w;		// 1/z, linear in screen space\n"
++
++"	// pixel length of the ray (clipped to the screen)\n"
++"	vec2 dn = n1 - ndc0;\n"
++"	vec2 over = max(abs(n1) - 1.0, 0.0)/max(abs(dn), vec2(1e-5));\n"
++"	float clipT = 1.0 - max(over.x, over.y);\n"
++"	if(clipT <= 0.0)\n"
++"		return vec4(0.0);\n"
++"	vec2 dpx = dn*clipT*0.5*u_ssrVP.zw;\n"
++"	float pl = max(abs(dpx.x), abs(dpx.y));\n"
++"	if(pl < 1.5)\n"
++"		return vec4(0.0);\n"
++"	float stride = max(2.0, pl/160.0);\n"
++"	int n = int(min(pl/stride, 160.0)) + 1;\n"
++"	float dt = clipT/float(n);\n"
++"	float jit = 0.25 + 0.75*fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
++
++"	float tPrev = 0.0;\n"
++"	for(int i = 0; i < 160; i++){\n"
++"		if(i >= n) break;\n"
++"		float t = dt*(float(i) + jit);\n"
++"		vec2 ndc = mix(ndc0, n1, t);\n"
++"		float z = 1.0/mix(k0, k1, t);\n"
++"		float sz = ssrEyeZ(textureLod(ssrDepth, ssrToTex(ndc), 0.0).r);\n"
++"		float diff = z - sz;\n"
++"		if(diff > 0.04 + 0.01*z && diff < 0.5 + 0.08*z){\n"
++"			float a = tPrev, b = t;\n"
++"			for(int j = 0; j < 7; j++){\n"
++"				float m = (a + b)*0.5;\n"
++"				vec2 nm = mix(ndc0, n1, m);\n"
++"				float zm = 1.0/mix(k0, k1, m);\n"
++"				if(zm - ssrEyeZ(textureLod(ssrDepth, ssrToTex(nm), 0.0).r) > 0.0) b = m; else a = m;\n"
++"			}\n"
++"			vec2 nb = mix(ndc0, n1, b);\n"
++"			float zb = 1.0/mix(k0, k1, b);\n"
++"			float tw = abs(R.z) > 0.02 ? (zb - P0.z)/R.z : tmax*b;\n"
++"			vec2 e = 1.0 - abs(nb);\n"
++"			float edge = clamp(min(e.x, e.y)*6.0, 0.0, 1.0);\n"
++"			float facing = smoothstep(-0.1, 0.35, R.z);\n"
++"			float dist = 1.0 - clamp(tw/80.0, 0.0, 1.0);\n"
++"			return vec4(textureLod(ssrColor, ssrToTex(nb), 0.0).rgb, edge*facing*dist);\n"
++"		}\n"
++"		tPrev = t;\n"
++"	}\n"
++"	return vec4(0.0);\n"
 +"}\n"
-+"\n"
++
 +"// Continuous, low-frequency grime in car coordinates: no screen-space grain or animated noise.\n"
 +"float grimeHash(vec2 p)\n"
 +"{\n"
-+"\tivec2 i=ivec2(p);\n"
-+"\tuint h=uint(i.x)*0x9E3779B9u ^ uint(i.y)*0x85EBCA6Bu;\n"
-+"\th^=h>>16u;h*=0x7FEB352Du;h^=h>>15u;h*=0x846CA68Bu;h^=h>>16u;\n"
-+"\treturn float(h&65535u)/65535.0;\n"
++"	ivec2 i=ivec2(p);\n"
++"	uint h=uint(i.x)*0x9E3779B9u ^ uint(i.y)*0x85EBCA6Bu;\n"
++"	h^=h>>16u;h*=0x7FEB352Du;h^=h>>15u;h*=0x846CA68Bu;h^=h>>16u;\n"
++"	return float(h&65535u)/65535.0;\n"
 +"}\n"
 +"float grimeNoise(vec2 p)\n"
 +"{\n"
-+"\tvec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);\n"
-+"\treturn mix(mix(grimeHash(i),grimeHash(i+vec2(1,0)),f.x),mix(grimeHash(i+vec2(0,1)),grimeHash(i+vec2(1,1)),f.x),f.y);\n"
++"	vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);\n"
++"	return mix(mix(grimeHash(i),grimeHash(i+vec2(1,0)),f.x),mix(grimeHash(i+vec2(0,1)),grimeHash(i+vec2(1,1)),f.x),f.y);\n"
 +"}\n"
 +"float dirtCoverage()\n"
 +"{\n"
-+"\tif(u_dirtProps.x<=0.001) return 0.0;\n"
-+"\tfloat h=(v_carPosition.z-u_dirtProps.z)/max(u_dirtProps.w,0.5);\n"
-+"\tvec2 p=v_carPosition.xy;\n"
-+"\tfloat patches=grimeNoise(p*3.0+u_dirtProps.y);\n"
-+"\tfloat streaks=grimeNoise(vec2(p.y*11.0,v_carPosition.z*1.5)+u_dirtProps.y);\n"
-+"\tfloat wheelDistance=min(abs(p.y-u_dirtAxles.x),abs(p.y-u_dirtAxles.y));\n"
-+"\tfloat splash=(1.0-smoothstep(0.25,0.85,wheelDistance))*(1.0-smoothstep(0.2,0.65,h));\n"
-+"\tfloat lower=1.0-smoothstep(0.12,0.80,h);\n"
-+"\treturn clamp(u_dirtProps.x*(0.10+lower*(0.50+0.35*patches)+splash*0.25+streaks*0.08),0.0,0.95);\n"
++"	if(u_dirtProps.x<=0.001) return 0.0;\n"
++"	float h=(v_carPosition.z-u_dirtProps.z)/max(u_dirtProps.w,0.5);\n"
++"	vec2 p=v_carPosition.xy;\n"
++"	float patches=grimeNoise(p*3.0+u_dirtProps.y);\n"
++"	float streaks=grimeNoise(vec2(p.y*11.0,v_carPosition.z*1.5)+u_dirtProps.y);\n"
++"	float wheelDistance=min(abs(p.y-u_dirtAxles.x),abs(p.y-u_dirtAxles.y));\n"
++"	float splash=(1.0-smoothstep(0.25,0.85,wheelDistance))*(1.0-smoothstep(0.2,0.65,h));\n"
++"	float lower=1.0-smoothstep(0.12,0.80,h);\n"
++"	return clamp(u_dirtProps.x*(0.10+lower*(0.50+0.35*patches)+splash*0.25+streaks*0.08),0.0,0.95);\n"
 +"}\n"
-+"\n"
+ 
  "void\n"
  "main(void)\n"
  "{\n"
 -"	vec4 pass1 = v_color*texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));\n"
 -"	vec3 envmap = texture(tex1, vec2(v_tex1.x, 1.0-v_tex1.y)).rgb;\n"
 -"	pass1.rgb = mix(pass1.rgb, envmap, v_reflcolor.a);\n"
--"	pass1.rgb = mix(u_fogColor.rgb, pass1.rgb, v_fog);\n"
--"//	pass1.rgb += v_reflcolor.rgb * v_fog;\n"
--
--"	vec3 pass2 = v_reflcolor.rgb * v_fog;\n"
--
--"	vec4 color;\n"
--"	color.rgb = pass1.rgb*pass1.a + pass2;\n"
--"	color.a = pass1.a;\n"
--
--"//	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);\n"
--"	DoAlphaTest(color.a);\n"
--
--"	FRAGCOLOR(color);\n"
-+"\t// Reflect the per-pixel view vector around a unit surface normal. Interpolating vertex reflection rays\n"
-+"\t// misses nearby cars across large body panels, and scaled component normals used to send rays into the car.\n"
-+"\tvec3 N = dot(v_normal,v_normal) > 1e-8 ? normalize(v_normal) : vec3(0.0,0.0,1.0);\n"
-+"\tvec3 V = normalize(v_viewVec);\n"
-+"\tvec3 reflected = reflect(-V,N);\n"
-+"\tfloat f = 1.0-clamp(dot(N,V),0.0,1.0);\n"
-+"\tfloat reflectionWeight = clamp(mix(f*f*f*f*f,1.0,u_reflProps.x)*u_reflProps.z,0.0,0.9);\n"
-+"\tif(u_ssrTex.z < -0.5){\n"
-+"\t\t// Glossy clear coat: keep the reflected scene legible head-on as well as at grazing angles.\n"
-+"\t\t// Material specularity still gates the coat, so tires and matte trim remain matte.\n"
-+"\t\tfloat coat = clamp(u_reflProps.z,0.0,1.0);\n"
-+"\t\treflectionWeight = mix(0.60,0.90,f*f*f*f*f)*coat;\n"
-+"\t}\n"
-+"\tfloat dirt=dirtCoverage();\n"
-+"\treflectionWeight *= 1.0-dirt*0.88;\n"
-+"\tvec4 sampled = texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));\n"
++"	// Reflect the per-pixel view vector around a unit surface normal. Interpolating vertex reflection rays\n"
++"	// misses nearby cars across large body panels, and scaled component normals used to send rays into the car.\n"
++"	vec3 N = dot(v_normal,v_normal) > 1e-8 ? normalize(v_normal) : vec3(0.0,0.0,1.0);\n"
++"	vec3 V = normalize(v_viewVec);\n"
++"	vec3 reflected = reflect(-V,N);\n"
++"	float f = 1.0-clamp(dot(N,V),0.0,1.0);\n"
++"	float reflectionWeight = clamp(mix(f*f*f*f*f,1.0,u_reflProps.x)*u_reflProps.z,0.0,0.9);\n"
++"	if(u_ssrTex.z < -0.5){\n"
++"		// Glossy clear coat: keep the reflected scene legible head-on as well as at grazing angles.\n"
++"		// Material specularity still gates the coat, so tires and matte trim remain matte.\n"
++"		float coat = clamp(u_reflProps.z,0.0,1.0);\n"
++"		reflectionWeight = mix(0.60,0.90,f*f*f*f*f)*coat;\n"
++"	}\n"
++"	float dirt=dirtCoverage();\n"
++"	reflectionWeight *= 1.0-dirt*0.88;\n"
++"	vec4 sampled = texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));\n"
 +" vec4 pass1 = v_color*sampled;\n"
 +" // DiffuseSampler2 decals are layered onto opaque paint. Their alpha is coverage,\n"
 +" // never window transparency; lettering retains its authored colour when the car is repainted.\n"
 +" if(u_liveryMode>0.5) pass1 = vec4(mix(v_color.rgb,v_lighting.rgb*sampled.rgb,sampled.a),v_color.a);\n"
-+"\tfloat light=clamp(dot(v_color.rgb,vec3(0.333333)),0.25,1.0);\n"
-+"\tvec3 dust=vec3(0.24,0.205,0.155)*light+pass1.rgb*0.15;\n"
-+"\tpass1.rgb=mix(pass1.rgb,dust,dirt*0.8);\n"
-+"\tvec3 envmap = vec3(0.0);\n"
-+"\tif(u_ssrTex.z > -0.5 || u_ssrTex.w > 0.5)\n"
-+"\t\tenvmap = texture(tex1, vec2(reflected.x*0.5+0.5, 0.5-reflected.y*0.5)).rgb;\n"
-+"\tif(u_ssrTex.z > 0.5){\n"
-+"\t\tvec4 s = ssrTrace(reflected);\n"
-+"\t\tif(u_ssrTex.w > 1.5){\n"
-+"\t\t\t// debug: show the screen space hit (magenta where there is none, black-to-red = no capture/sky)\n"
-+"\t\t\tFRAGCOLOR(vec4(mix(vec3(1.0, 0.0, 1.0), s.rgb, s.a), 1.0));\n"
-+"\t\t\treturn;\n"
-+"\t\t}\n"
-+"\t\tenvmap = mix(envmap, s.rgb, s.a);\n"
-+"\t}\n"
-+"\tif(u_ssrTex.w > 0.5 && u_ssrTex.w < 1.5){\n"
-+"\t\t// debug: show the env map alone\n"
-+"\t\tFRAGCOLOR(vec4(envmap, 1.0));\n"
-+"\t\treturn;\n"
-+"\t}\n"
-+"\t// The current textured ray trace replaces the legacy environment coat, rather than covering it.\n"
-+"\tif(u_ssrTex.z > -0.5) pass1.rgb = mix(pass1.rgb, envmap, reflectionWeight);\n"
-+"\tpass1.rgb = mix(u_fogColor.rgb, pass1.rgb, v_fog);\n"
-+"//\tpass1.rgb += v_reflcolor.rgb * v_fog;\n"
-+"\n"
-+"\tvec3 pass2 = v_reflcolor.rgb * v_fog * (1.0-dirt*0.9);\n"
-+"\n"
-+"\tvec4 color;\n"
-+"\tcolor.rgb = pass1.rgb*pass1.a + pass2;\n"
-+"\tcolor.a = pass1.a;\n"
-+"\n"
-+"//\tcolor.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);\n"
-+"\tDoAlphaTest(color.a);\n"
-+"\n"
-+"\tWRITE_VEL();\n"
++"	float light=clamp(dot(v_color.rgb,vec3(0.333333)),0.25,1.0);\n"
++"	vec3 dust=vec3(0.24,0.205,0.155)*light+pass1.rgb*0.15;\n"
++"	pass1.rgb=mix(pass1.rgb,dust,dirt*0.8);\n"
++"	vec3 envmap = vec3(0.0);\n"
++"	if(u_ssrTex.z > -0.5 || u_ssrTex.w > 0.5)\n"
++"		envmap = texture(tex1, vec2(reflected.x*0.5+0.5, 0.5-reflected.y*0.5)).rgb;\n"
++"	if(u_ssrTex.z > 0.5){\n"
++"		vec4 s = ssrTrace(reflected);\n"
++"		if(u_ssrTex.w > 1.5){\n"
++"			// debug: show the screen space hit (magenta where there is none, black-to-red = no capture/sky)\n"
++"			FRAGCOLOR(vec4(mix(vec3(1.0, 0.0, 1.0), s.rgb, s.a), 1.0));\n"
++"			return;\n"
++"		}\n"
++"		envmap = mix(envmap, s.rgb, s.a);\n"
++"	}\n"
++"	if(u_ssrTex.w > 0.5 && u_ssrTex.w < 1.5){\n"
++"		// debug: show the env map alone\n"
++"		FRAGCOLOR(vec4(envmap, 1.0));\n"
++"		return;\n"
++"	}\n"
++"	// The current textured ray trace replaces the legacy environment coat, rather than covering it.\n"
++"	if(u_ssrTex.z > -0.5) pass1.rgb = mix(pass1.rgb, envmap, reflectionWeight);\n"
+ "	pass1.rgb = mix(u_fogColor.rgb, pass1.rgb, v_fog);\n"
+ "//	pass1.rgb += v_reflcolor.rgb * v_fog;\n"
+ 
+-"	vec3 pass2 = v_reflcolor.rgb * v_fog;\n"
++"	vec3 pass2 = v_reflcolor.rgb * v_fog * (1.0-dirt*0.9);\n"
+ 
+ "	vec4 color;\n"
+ "	color.rgb = pass1.rgb*pass1.a + pass2;\n"
+@@ -26,6 +189,16 @@ const char *neoVehicle_frag_src =
+ "//	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);\n"
+ "	DoAlphaTest(color.a);\n"
+ 
++"	WRITE_VEL();\n"
 +"#if defined(HAS_VEL_OUT) && defined(VEL_PIPE)\n"
-+"\tvelOut.b = -u_reflectionOwner;\n"
++"	velOut.b = -u_reflectionOwner;\n"
++"	// Negative alpha identifies a car and stores the actual pane/panel depth.\n"
++"	// The opaque depth buffer can belong to an occupant behind transparent glass.\n"
++"	velOut.a = -max(gl_FragCoord.z, 1.0e-8);\n"
 +"#endif\n"
 +"#ifdef REFL_OUT\n"
-+"\treflOut = vec4(reflected*0.5 + 0.5, reflectionWeight);\t// direction*0.5+0.5, weight (stored at half-float precision)\n"
++"	reflOut = vec4(reflected*0.5 + 0.5, reflectionWeight);	// direction*0.5+0.5, weight (stored at half-float precision)\n"
 +"#endif\n"
-+"\tFRAGCOLOR(color);\n"
+ "	FRAGCOLOR(color);\n"
  "}\n"
  ;
 diff --git a/src/extras/shaders/obj/neoVehicle_vert.inc b/src/extras/shaders/obj/neoVehicle_vert.inc
@@ -14498,7 +14555,7 @@ index 00000000..17b570bf
 +// Upstate Liberty extensions are enabled only when its data set is present.
 +inline bool IsUpstate(void) { return CModelTraits::DataPresent(); }
 diff --git a/src/modelinfo/VehicleModelInfo.cpp b/src/modelinfo/VehicleModelInfo.cpp
-index d31962ce..d5a042cf 100644
+index d31962ce..03caefd0 100644
 --- a/src/modelinfo/VehicleModelInfo.cpp
 +++ b/src/modelinfo/VehicleModelInfo.cpp
 @@ -78,6 +78,9 @@ RwObjectNameIdAssocation carIds[] = {
@@ -14548,7 +14605,16 @@ index d31962ce..d5a042cf 100644
  		}
  		ms_compsUsed[1] = comp2;
  	}else{
-@@ -537,6 +544,13 @@ CVehicleModelInfo::PreprocessHierarchy(void)
+@@ -275,6 +282,8 @@ CVehicleModelInfo::ConvertAnimFileIndex(void)
+ RwFrame*
+ CVehicleModelInfo::CollapseFramesCB(RwFrame *frame, void *data)
+ {
++ // Imported lenses retain their component-local transform and per-instance damage identity.
++ if(strncmp(GetFrameNodeName(frame),"iv_lamp_",8)==0) return frame;
+ 	RwFrameForAllChildren(frame, CollapseFramesCB, data);
+ 	RwFrameForAllObjects(frame, MoveObjectsCB, data);
+ 	RwFrameDestroy(frame);
+@@ -537,6 +546,13 @@ CVehicleModelInfo::PreprocessHierarchy(void)
  	RwV3d *rwvec;
  
  	desc = ms_vehicleDescs[m_vehicleType];
@@ -14562,7 +14628,7 @@ index d31962ce..d5a042cf 100644
  	m_numDoors = 0;
  	m_numComps = 0;
  
-@@ -564,6 +578,13 @@ CVehicleModelInfo::PreprocessHierarchy(void)
+@@ -564,6 +580,13 @@ CVehicleModelInfo::PreprocessHierarchy(void)
  			RwFrameDestroy(assoc.frame);
  		}else{
  			atomic = (RpAtomic*)GetFirstObject(assoc.frame);
@@ -14576,7 +14642,7 @@ index d31962ce..d5a042cf 100644
  			RpClumpRemoveAtomic(m_clump, atomic);
  			RwFrameRemoveChild(assoc.frame);
  			SetVehicleComponentFlags(assoc.frame, desc[i].flags);
-@@ -598,9 +619,26 @@ CVehicleModelInfo::PreprocessHierarchy(void)
+@@ -598,9 +621,26 @@ CVehicleModelInfo::PreprocessHierarchy(void)
  		SetVehicleComponentFlags(assoc.frame, desc[i].flags);
  
  		if(desc[i].flags & VEHICLE_FLAG_ADD_WHEEL){
@@ -14606,7 +14672,7 @@ index d31962ce..d5a042cf 100644
  				RwV3d scale;
  				atomic = (RpAtomic*)CModelInfo::GetModelInfo(m_wheelId)->CreateInstance();
  				RwFrameDestroy(RpAtomicGetFrame(atomic));
-@@ -615,6 +653,11 @@ CVehicleModelInfo::PreprocessHierarchy(void)
+@@ -615,6 +655,11 @@ CVehicleModelInfo::PreprocessHierarchy(void)
  			}
  		}
  	}
@@ -14618,7 +14684,7 @@ index d31962ce..d5a042cf 100644
  }
  
  void
-@@ -711,13 +754,13 @@ int32
+@@ -711,13 +756,13 @@ int32
  GetListOfComponentsNotUsedByRules(uint32 comprules, int32 numComps, int32 *comps)
  {
  	int32 i, n;
@@ -14634,7 +14700,7 @@ index d31962ce..d5a042cf 100644
  				unused[n] = 0xF;
  		}
  	// second comprule
-@@ -725,7 +768,7 @@ GetListOfComponentsNotUsedByRules(uint32 comprules, int32 numComps, int32 *comps
+@@ -725,7 +770,7 @@ GetListOfComponentsNotUsedByRules(uint32 comprules, int32 numComps, int32 *comps
  	if(COMPRULE_RULE(comprules) && IsValidCompRule(COMPRULE_RULE(comprules)))
  		for(i = 0; i < 3; i++){
  			n = COMPRULE_COMPN(comprules, i);
@@ -14643,7 +14709,7 @@ index d31962ce..d5a042cf 100644
  				unused[n] = 0xF;
  		}
  
-@@ -752,7 +795,7 @@ int32
+@@ -752,7 +797,7 @@ int32
  CVehicleModelInfo::ChooseComponent(void)
  {
  	int32 comp;
@@ -14652,7 +14718,7 @@ index d31962ce..d5a042cf 100644
  	int32 n;
  
  	comp = -1;
-@@ -775,7 +818,7 @@ int32
+@@ -775,7 +820,7 @@ int32
  CVehicleModelInfo::ChooseSecondComponent(void)
  {
  	int32 comp;
@@ -14661,7 +14727,7 @@ index d31962ce..d5a042cf 100644
  	int32 n;
  
  	comp = -1;
-@@ -812,11 +855,17 @@ CVehicleModelInfo::GetEditableMaterialListCB(RpMaterial *material, void *data)
+@@ -812,11 +857,17 @@ CVehicleModelInfo::GetEditableMaterialListCB(RpMaterial *material, void *data)
  
  	cbdata = (editableMatCBData*)data;
  	col = RpMaterialGetColor(material);
@@ -14681,7 +14747,7 @@ index d31962ce..d5a042cf 100644
  		RpMaterialSetColor(material, &white);
  	}
  	return material;
-@@ -1046,6 +1095,10 @@ CVehicleModelInfo::LoadVehicleColours(void)
+@@ -1046,6 +1097,10 @@ CVehicleModelInfo::LoadVehicleColours(void)
  				&colors[12], &colors[13],
  				&colors[14], &colors[15]);
  			CVehicleModelInfo *mi = (CVehicleModelInfo*)CModelInfo::GetModelInfo(name, nil);
@@ -15525,7 +15591,7 @@ index 1174216c..ea6ebb4f 100644
  	void UpperCase(wchar *s);
  	void GetNameOfLoadedMissionText(char *outName);
 diff --git a/src/vehicles/Automobile.cpp b/src/vehicles/Automobile.cpp
-index 815b2534..6b72b35b 100644
+index 815b2534..079e807b 100644
 --- a/src/vehicles/Automobile.cpp
 +++ b/src/vehicles/Automobile.cpp
 @@ -1,4 +1,5 @@
@@ -15534,15 +15600,16 @@ index 815b2534..6b72b35b 100644
  #include "main.h"
  
  #include "General.h"
-@@ -48,6 +49,7 @@
+@@ -48,6 +49,8 @@
  #include "PlayerPed.h"
  #include "Object.h"
  #include "Automobile.h"
 +#include "ImportedSuspension.h"
++#include "NodeName.h"
  #include "Bike.h"
  #include "Wanted.h"
  #include "SaveBuf.h"
-@@ -101,6 +103,11 @@ CAutomobile::CAutomobile(int32 id, uint8 CreatedBy)
+@@ -101,6 +104,11 @@ CAutomobile::CAutomobile(int32 id, uint8 CreatedBy)
  	}
  
  	pHandling = mod_HandlingManager.GetHandlingData((tVehicleType)mi->m_handlingId);
@@ -15554,7 +15621,7 @@ index 815b2534..6b72b35b 100644
  	pFlyingHandling =  mod_HandlingManager.GetFlyingPointer((tVehicleType)mi->m_handlingId);
  
  	m_auto_unused1 = 20.0f;
-@@ -368,6 +375,9 @@ CAutomobile::ProcessControl(void)
+@@ -368,6 +376,9 @@ CAutomobile::ProcessControl(void)
  			CCarAI::GetCarToParkAtCoors(this, &parkPosition);
  	}
  
@@ -15564,7 +15631,7 @@ index 815b2534..6b72b35b 100644
  	// Process depending on status
  
  	bool playerRemote = false;
-@@ -780,7 +790,7 @@ CAutomobile::ProcessControl(void)
+@@ -780,7 +791,7 @@ CAutomobile::ProcessControl(void)
  				if(i == CARWHEEL_REAR_LEFT || i == CARWHEEL_REAR_RIGHT)
  					bias = 1.0f - bias;
  
@@ -15573,7 +15640,7 @@ index 815b2534..6b72b35b 100644
  					springDirections[i], contactPoints[i],
  					m_aSuspensionSpringRatio[i], bias, m_aWheelColPoints[i].normal);
  
-@@ -817,7 +827,7 @@ CAutomobile::ProcessControl(void)
+@@ -817,7 +828,7 @@ CAutomobile::ProcessControl(void)
  		// dampen springs
  		for(i = 0; i < 4; i++)
  			if(m_aSuspensionSpringRatio[i] < 0.99999f)
@@ -15582,7 +15649,7 @@ index 815b2534..6b72b35b 100644
  					springDirections[i], contactPoints[i], contactSpeeds[i]);
  
  		// Get speed at contact points again
-@@ -836,6 +846,7 @@ CAutomobile::ProcessControl(void)
+@@ -836,6 +847,7 @@ CAutomobile::ProcessControl(void)
  			gripCheat = false;
  		float acceleration = pHandling->Transmission.CalculateDriveAcceleration(m_fGasPedal, m_nCurrentGear, m_fChangeGearTime, fwdSpeed, gripCheat);
  		acceleration /= m_fForceMultiplier;
@@ -15590,7 +15657,7 @@ index 815b2534..6b72b35b 100644
  
  		if(IsRealHeli() || IsRealPlane())
  			acceleration = 0.0f;
-@@ -860,6 +871,7 @@ CAutomobile::ProcessControl(void)
+@@ -860,6 +872,7 @@ CAutomobile::ProcessControl(void)
  		}
  
  		brake = m_fBrakePedal * pHandling->fBrakeDeceleration * CTimer::GetTimeStep();
@@ -15598,7 +15665,7 @@ index 815b2534..6b72b35b 100644
  		bool neutralHandling = GetStatus() != STATUS_PLAYER && GetStatus() != STATUS_PLAYER_REMOTE && (pHandling->Flags & HANDLING_NEUTRALHANDLING);
  		float brakeBiasFront = neutralHandling ? 1.0f : 2.0f*pHandling->fBrakeBias;
  		float brakeBiasRear  = neutralHandling ? 1.0f : 2.0f-pHandling->fBrakeBias;	// looks like a bug, but it was correct in III...
-@@ -903,6 +915,7 @@ CAutomobile::ProcessControl(void)
+@@ -903,6 +916,7 @@ CAutomobile::ProcessControl(void)
  			traction = 0.004f;
  		traction *= pHandling->fTractionMultiplier / 4.0f;
  		traction /= m_fForceMultiplier;
@@ -15606,7 +15673,7 @@ index 815b2534..6b72b35b 100644
  		if(CVehicle::bCheat3)
  			traction *= 4.0f;
  
-@@ -931,7 +944,7 @@ CAutomobile::ProcessControl(void)
+@@ -931,7 +945,7 @@ CAutomobile::ProcessControl(void)
  
  			if(m_aWheelTimer[CARWHEEL_FRONT_LEFT] > 0.0f){
  				if(mod_HandlingManager.HasFrontWheelDrive(pHandling->nIdentifier))
@@ -15615,7 +15682,7 @@ index 815b2534..6b72b35b 100644
  				else
  					fThrust = 0.0f;
  
-@@ -954,7 +967,7 @@ CAutomobile::ProcessControl(void)
+@@ -954,7 +968,7 @@ CAutomobile::ProcessControl(void)
  					ProcessWheel(wheelFwd, wheelRight,
  						contactSpeeds[CARWHEEL_FRONT_LEFT], contactPoints[CARWHEEL_FRONT_LEFT],
  						m_nWheelsOnGround, fThrust,
@@ -15624,7 +15691,7 @@ index 815b2534..6b72b35b 100644
  						adhesion*tractionBiasFront*Damage.m_fWheelDamageEffect,
  						CARWHEEL_FRONT_LEFT,
  						&m_aWheelSpeed[CARWHEEL_FRONT_LEFT],
-@@ -964,7 +977,7 @@ CAutomobile::ProcessControl(void)
+@@ -964,7 +978,7 @@ CAutomobile::ProcessControl(void)
  					ProcessWheel(wheelFwd, wheelRight,
  						contactSpeeds[CARWHEEL_FRONT_LEFT], contactPoints[CARWHEEL_FRONT_LEFT],
  						m_nWheelsOnGround, fThrust,
@@ -15633,7 +15700,7 @@ index 815b2534..6b72b35b 100644
  						adhesion*tractionBiasFront,
  						CARWHEEL_FRONT_LEFT,
  						&m_aWheelSpeed[CARWHEEL_FRONT_LEFT],
-@@ -974,7 +987,7 @@ CAutomobile::ProcessControl(void)
+@@ -974,7 +988,7 @@ CAutomobile::ProcessControl(void)
  
  			if(m_aWheelTimer[CARWHEEL_FRONT_RIGHT] > 0.0f){
  				if(mod_HandlingManager.HasFrontWheelDrive(pHandling->nIdentifier))
@@ -15642,7 +15709,7 @@ index 815b2534..6b72b35b 100644
  				else
  					fThrust = 0.0f;
  
-@@ -997,7 +1010,7 @@ CAutomobile::ProcessControl(void)
+@@ -997,7 +1011,7 @@ CAutomobile::ProcessControl(void)
  					ProcessWheel(wheelFwd, wheelRight,
  						contactSpeeds[CARWHEEL_FRONT_RIGHT], contactPoints[CARWHEEL_FRONT_RIGHT],
  						m_nWheelsOnGround, fThrust,
@@ -15651,7 +15718,7 @@ index 815b2534..6b72b35b 100644
  						adhesion*tractionBiasFront*Damage.m_fWheelDamageEffect,
  						CARWHEEL_FRONT_RIGHT,
  						&m_aWheelSpeed[CARWHEEL_FRONT_RIGHT],
-@@ -1007,7 +1020,7 @@ CAutomobile::ProcessControl(void)
+@@ -1007,7 +1021,7 @@ CAutomobile::ProcessControl(void)
  					ProcessWheel(wheelFwd, wheelRight,
  						contactSpeeds[CARWHEEL_FRONT_RIGHT], contactPoints[CARWHEEL_FRONT_RIGHT],
  						m_nWheelsOnGround, fThrust,
@@ -15660,7 +15727,7 @@ index 815b2534..6b72b35b 100644
  						adhesion*tractionBiasFront,
  						CARWHEEL_FRONT_RIGHT,
  						&m_aWheelSpeed[CARWHEEL_FRONT_RIGHT],
-@@ -1081,7 +1094,7 @@ CAutomobile::ProcessControl(void)
+@@ -1081,7 +1095,7 @@ CAutomobile::ProcessControl(void)
  
  			if(m_aWheelTimer[CARWHEEL_REAR_LEFT] > 0.0f){
  				if(mod_HandlingManager.HasRearWheelDrive(pHandling->nIdentifier))
@@ -15669,7 +15736,7 @@ index 815b2534..6b72b35b 100644
  				else
  					fThrust = 0.0f;
  
-@@ -1126,7 +1139,7 @@ CAutomobile::ProcessControl(void)
+@@ -1126,7 +1140,7 @@ CAutomobile::ProcessControl(void)
  
  			if(m_aWheelTimer[CARWHEEL_REAR_RIGHT] > 0.0f){
  				if(mod_HandlingManager.HasRearWheelDrive(pHandling->nIdentifier))
@@ -15678,7 +15745,7 @@ index 815b2534..6b72b35b 100644
  				else
  					fThrust = 0.0f;
  
-@@ -1527,7 +1540,7 @@ CAutomobile::ProcessControl(void)
+@@ -1527,7 +1541,7 @@ CAutomobile::ProcessControl(void)
  	// A similar calculation of damagePos is done elsewhere for smoke
  
  	uint8 engineStatus = Damage.GetEngineStatus();
@@ -15687,7 +15754,7 @@ index 815b2534..6b72b35b 100644
  
  	switch(Damage.GetDoorStatus(DOOR_BONNET)){
  	case DOOR_STATUS_OK:
-@@ -1990,6 +2003,7 @@ CAutomobile::PreRender(void)
+@@ -1990,6 +2004,7 @@ CAutomobile::PreRender(void)
  		CVector pos1, pos2, dir1, dir2;
  
  		if(exhaustPos != CVector(0.0f, 0.0f, 0.0f)){
@@ -15695,7 +15762,7 @@ index 815b2534..6b72b35b 100644
  			dir1.z = 0.0f;
  			dir2.z = 0.0f;
  			if(fwdSpeed < 10.0f){
-@@ -2268,9 +2282,10 @@ CAutomobile::PreRender(void)
+@@ -2268,9 +2283,10 @@ CAutomobile::PreRender(void)
  		// Headlights
  
  		CVector headLightPos = mi->m_positions[CAR_POS_HEADLIGHTS];
@@ -15709,7 +15776,7 @@ index 815b2534..6b72b35b 100644
  
  		// Headlight coronas
  		if(DotProduct(lightR-TheCamera.GetPosition(), GetForward()) < 0.0f &&
-@@ -2359,9 +2374,10 @@ CAutomobile::PreRender(void)
+@@ -2359,9 +2375,10 @@ CAutomobile::PreRender(void)
  		// Taillights
  
  		CVector tailLightPos = mi->m_positions[CAR_POS_TAILLIGHTS];
@@ -15723,7 +15790,7 @@ index 815b2534..6b72b35b 100644
  
  		// Taillight coronas
  		if(DotProduct(lightR-TheCamera.GetPosition(), GetForward()) > 0.0f){
-@@ -2473,9 +2489,10 @@ CAutomobile::PreRender(void)
+@@ -2473,9 +2490,10 @@ CAutomobile::PreRender(void)
  		// Lights off
  
  		CVector lightPos = mi->m_positions[CAR_POS_TAILLIGHTS];
@@ -15737,7 +15804,7 @@ index 815b2534..6b72b35b 100644
  
  		if(m_fBrakePedal > 0.0f || m_fGasPedal < 0.0f){
  			CVector lookVector = GetPosition() - TheCamera.GetPosition();
-@@ -2747,6 +2764,7 @@ CAutomobile::PreRender(void)
+@@ -2747,6 +2765,7 @@ CAutomobile::PreRender(void)
  			mat.SetRotate(m_aWheelRotation[CARWHEEL_FRONT_RIGHT], 0.0f, m_fSteerAngle+0.3f*Sin(m_aWheelRotation[CARWHEEL_FRONT_RIGHT]));
  		else
  			mat.SetRotate(m_aWheelRotation[CARWHEEL_FRONT_RIGHT], 0.0f, m_fSteerAngle);
@@ -15745,7 +15812,7 @@ index 815b2534..6b72b35b 100644
  		mat.Scale(mi->m_wheelScale);
  		mat.Translate(pos);
  		mat.UpdateRW();
-@@ -2783,6 +2801,7 @@ CAutomobile::PreRender(void)
+@@ -2783,6 +2802,7 @@ CAutomobile::PreRender(void)
  		pos.z = m_aWheelPosition[CARWHEEL_FRONT_RIGHT];
  		// no damaged wheels or steering
  		mat.SetRotate(m_aWheelRotation[CARWHEEL_FRONT_RIGHT], 0.0f, 0.0f);
@@ -15753,7 +15820,7 @@ index 815b2534..6b72b35b 100644
  		mat.Scale(mi->m_wheelScale);
  		mat.Translate(pos);
  		mat.UpdateRW();
-@@ -2793,6 +2812,7 @@ CAutomobile::PreRender(void)
+@@ -2793,6 +2813,7 @@ CAutomobile::PreRender(void)
  		pos.z = m_aWheelPosition[CARWHEEL_FRONT_LEFT];
  		// no damaged wheels or steering
  		mat.SetRotate(-m_aWheelRotation[CARWHEEL_FRONT_LEFT], 0.0f, PI);
@@ -15761,16 +15828,17 @@ index 815b2534..6b72b35b 100644
  		mat.Scale(mi->m_wheelScale);
  		mat.Translate(pos);
  		mat.UpdateRW();
-@@ -2920,6 +2940,8 @@ CAutomobile::PreRender(void)
+@@ -2920,6 +2941,9 @@ CAutomobile::PreRender(void)
  		ProcessSwingingDoor(CAR_BOOT, DOOR_BOOT);
  	}
  
 +	UpdateImportedSuspension();
++ UpdateImportedLampGlass();
 +
  	if((GetModelIndex() == MI_PHEONIX || GetModelIndex() == MI_BFINJECT) &&
  	   GetStatus() == STATUS_PLAYER && m_aCarNodes[CAR_WING_LR]){
  		float rotation = 0.0f;
-@@ -3181,7 +3203,8 @@ CAutomobile::ProcessControlInputs(uint8 pad)
+@@ -3181,7 +3205,8 @@ CAutomobile::ProcessControlInputs(uint8 pad)
  		fValue = -sq(m_fSteerInput);
  	else
  		fValue = sq(m_fSteerInput);
@@ -15780,7 +15848,7 @@ index 815b2534..6b72b35b 100644
  
  	if(bComedyControls){
  		int rnd = CGeneral::GetRandomNumber() % 10;
-@@ -4110,10 +4133,11 @@ CAutomobile::VehicleDamage(float impulse, uint16 damagedPiece)
+@@ -4110,10 +4135,11 @@ CAutomobile::VehicleDamage(float impulse, uint16 damagedPiece)
  		if(bNotDamagedUpsideDown || GetStatus() == STATUS_PLAYER_REMOTE || bIsInWater)
  			return;
  		if(GetStatus() != STATUS_WRECKED)
@@ -15793,7 +15861,7 @@ index 815b2534..6b72b35b 100644
  	if(impulse > minImpulse && GetStatus() != STATUS_WRECKED){
  		if(bIsLawEnforcer &&
  		   FindPlayerVehicle() && FindPlayerVehicle() == m_pDamageEntity &&
-@@ -4375,7 +4399,7 @@ CAutomobile::AddDamagedVehicleParticles(void)
+@@ -4375,7 +4401,7 @@ CAutomobile::AddDamagedVehicleParticles(void)
  		return;
  
  	CVector direction = fSpeedMult[5]*m_vecMoveSpeed;
@@ -15802,7 +15870,7 @@ index 815b2534..6b72b35b 100644
  
  	switch(Damage.GetDoorStatus(DOOR_BONNET)){
  	case DOOR_STATUS_OK:
-@@ -4565,6 +4589,10 @@ CAutomobile::SetComponentRotation(int32 component, CVector rotation)
+@@ -4565,6 +4591,10 @@ CAutomobile::SetComponentRotation(int32 component, CVector rotation)
  void
  CAutomobile::OpenDoor(int32 component, eDoors door, float openRatio)
  {
@@ -15813,7 +15881,7 @@ index 815b2534..6b72b35b 100644
  	CMatrix mat(RwFrameGetMatrix(m_aCarNodes[component]));
  	CVector pos = mat.GetPosition();
  	float axes[3] = { 0.0f, 0.0f, 0.0f };
-@@ -5708,12 +5736,24 @@ SetVehicleAtomicVisibilityCB(RwObject *object, void *data)
+@@ -5708,12 +5738,62 @@ SetVehicleAtomicVisibilityCB(RwObject *object, void *data)
  	return object;
  }
  
@@ -15831,21 +15899,60 @@ index 815b2534..6b72b35b 100644
 + return flags;
 +}
 +
++void
++CAutomobile::SetComponentVisibility(RwFrame *frame,uint32 flags)
++{
++ HideAllComps();bIsDamaged=true;ApplyVehicleComponentVisibility(frame,flags);
++ for(auto &lens:m_importedLamps){
++  auto *parent=RpAtomicGetFrame(lens.atomic);
++  while(parent && parent!=frame)parent=RwFrameGetParent(parent);
++  if(parent){lens.componentVisible=flags!=ATOMIC_FLAG_NONE;SetImportedLampBroken(lens,lens.broken);}
++ }
++}
++
++static RwFrame *CollectImportedLampFrames(RwFrame *frame,void *data)
++{
++ auto *parts=(std::vector<ImportedLampLens>*)data;const char *name=GetFrameNodeName(frame);
++ const char *prefixes[]={"iv_lamp_fl","iv_lamp_fr","iv_lamp_rl","iv_lamp_rr"};
++ for(int side=0;side<4;side++) if(strncmp(name,prefixes[side],10)==0){
++  struct Context {std::vector<ImportedLampLens> *parts;int side;} context={parts,side};
++  RwFrameForAllObjects(frame,[](RwObject *object,void *raw)->RwObject*{
++   auto &ctx=*(Context*)raw;if(RwObjectGetType(object)==rpATOMIC && ctx.parts->size()<64){ImportedLampLens lens;lens.atomic=(RpAtomic*)object;lens.side=ctx.side;lens.flags=RpAtomicGetFlags(lens.atomic);ctx.parts->push_back(lens);}return object;
++  },&context);
++ }
++ RwFrameForAllChildren(frame,CollectImportedLampFrames,data);return frame;
++}
++
  void
 -CAutomobile::SetComponentVisibility(RwFrame *frame, uint32 flags)
-+CAutomobile::SetComponentVisibility(RwFrame *frame,uint32 flags)
++CAutomobile::UpdateImportedLampGlass(void)
  {
 -	HideAllComps();
 -	bIsDamaged = true;
 -	RwFrameForAllObjects(frame, SetVehicleAtomicVisibilityCB, (void*)flags);
-+ HideAllComps();bIsDamaged=true;ApplyVehicleComponentVisibility(frame,flags);
++ static const eLights lights[]={VEHLIGHT_FRONT_LEFT,VEHLIGHT_FRONT_RIGHT,VEHLIGHT_REAR_LEFT,VEHLIGHT_REAR_RIGHT};
++ for(auto &lens:m_importedLamps){
++  if(!SetImportedLampBroken(lens,Damage.GetLightStatus(lights[lens.side])!=LIGHT_STATUS_OK)) continue;
++  auto *geo=RpAtomicGetGeometry(lens.atomic);if(!geo || !geo->numMorphTargets || !geo->morphTargets[0].vertices || geo->numVertices<3)continue;
++  const auto *v=geo->morphTargets[0].vertices;float lo[3]={v[0].x,v[0].y,v[0].z},hi[3]={v[0].x,v[0].y,v[0].z};
++  for(int i=1;i<geo->numVertices;i++){const float p[]={v[i].x,v[i].y,v[i].z};for(int j=0;j<3;j++){lo[j]=Min(lo[j],p[j]);hi[j]=Max(hi[j],p[j]);}}
++  int a=0,b=1;float span[3]={hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2]};
++  for(int i=0;i<3;i++)if(span[i]>span[a])a=i;b=(a+1)%3;for(int i=0;i<3;i++)if(i!=a && span[i]>span[b])b=i;
++  if(span[a]>.95f || span[b]>.75f || span[b]<.005f)continue;
++  RwV3d local[3],world[3];float origin[3]={(lo[0]+hi[0])*.5f,(lo[1]+hi[1])*.5f,(lo[2]+hi[2])*.5f};origin[a]=lo[a];origin[b]=lo[b];
++  local[0]={origin[0],origin[1],origin[2]};origin[a]=hi[a];local[1]={origin[0],origin[1],origin[2]};origin[a]=lo[a];origin[b]=hi[b];local[2]={origin[0],origin[1],origin[2]};
++  RwV3dTransformPoints(world,local,3,RwFrameGetLTM(RpAtomicGetFrame(lens.atomic)));
++  CVector pos(world[0]),right=CVector(world[1])-pos,up=CVector(world[2])-pos;
++  CGlass::GeneratePanesForWindow(2,pos,up,right,m_vecMoveSpeed,pos+(right+up)*.5f,.03f,false,false,1,true);
++ }
  }
  
  void
-@@ -5723,6 +5763,45 @@ CAutomobile::SetupModelNodes(void)
+@@ -5723,6 +5803,46 @@ CAutomobile::SetupModelNodes(void)
  	for(i = 0; i < NUM_CAR_NODES; i++)
  		m_aCarNodes[i] = nil;
  	CClumpModelInfo::FillFrameArray(GetClump(), m_aCarNodes);
++ m_importedLamps.clear();RwFrameForAllChildren(RpClumpGetFrame(GetClump()),CollectImportedLampFrames,&m_importedLamps);
 + static const char *suffixes[] = { "lf", "lr", "rf", "rr", "lm", "rm" };
 + static const int wheelNodes[] = { CAR_WHEEL_LF,CAR_WHEEL_LB,CAR_WHEEL_RF,CAR_WHEEL_RB,CAR_WHEEL_LM,CAR_WHEEL_RM };
 + for(i=0;i<15;i++) m_importedGear[i]=ImportedRunningGear();
@@ -15889,7 +15996,7 @@ index 815b2534..6b72b35b 100644
  
  void
 diff --git a/src/vehicles/Automobile.h b/src/vehicles/Automobile.h
-index f4046e9e..55a31616 100644
+index f4046e9e..9fd6327f 100644
 --- a/src/vehicles/Automobile.h
 +++ b/src/vehicles/Automobile.h
 @@ -4,6 +4,7 @@
@@ -15900,7 +16007,7 @@ index f4046e9e..55a31616 100644
  
  class CObject;
  
-@@ -169,6 +170,17 @@ public:
+@@ -169,6 +170,19 @@ public:
  	static const uint32 nSaveStructSize;
  
  	static void SetAllTaxiLights(bool set);
@@ -15913,6 +16020,8 @@ index f4046e9e..55a31616 100644
 +	};
 +	ImportedSuspension m_importedSuspension[6];
 +	ImportedRunningGear m_importedGear[15];
++ std::vector<ImportedLampLens> m_importedLamps;
++ void UpdateImportedLampGlass(void);
 +	tHandlingData m_convertedHandling;
 +	void UpdateImportedSuspension(void);
  };
@@ -15998,10 +16107,10 @@ index 8d290f7d..6552fc7b 100644
  	void ConvertDataToGameUnits(tHandlingData *handling);
 diff --git a/src/vehicles/ImportedSuspension.h b/src/vehicles/ImportedSuspension.h
 new file mode 100644
-index 00000000..7fd85a8e
+index 00000000..1ca6534a
 --- /dev/null
 +++ b/src/vehicles/ImportedSuspension.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,105 @@
 +#pragma once
 +
 +// Existing suspension-arm geometry pivots about the chassis; wheel spin and
@@ -16090,6 +16199,22 @@ index 00000000..7fd85a8e
 +  }
 + }
 + g->unlock();
++}
++
++// Optional authored lamp lens meshes; visibility belongs to each vehicle instance.
++struct ImportedLampLens {
++ RpAtomic *atomic = nil;
++ int side = 0;
++ uint32 flags = 0;
++ bool broken = false, componentVisible = true;
++};
++inline bool SetImportedLampBroken(ImportedLampLens &lens, bool broken)
++{
++ if(!lens.atomic) return false;
++ bool changed=lens.broken!=broken;
++ RpAtomicSetFlags(lens.atomic,broken || !lens.componentVisible?0:lens.flags);
++ lens.broken=broken;
++ return changed && broken && lens.componentVisible; // exactly one shatter event on the intact -> broken transition
 +}
 diff --git a/tools-mtl/difftest.mm b/tools-mtl/difftest.mm
 new file mode 100644
@@ -16264,7 +16389,7 @@ index 00000000..96cefb49
 +}}
 diff --git a/tools-mtl/mfx-reactive-test.cpp b/tools-mtl/mfx-reactive-test.cpp
 new file mode 100644
-index 00000000..9a2129af
+index 00000000..254d244f
 --- /dev/null
 +++ b/tools-mtl/mfx-reactive-test.cpp
 @@ -0,0 +1,93 @@
@@ -16320,11 +16445,11 @@ index 00000000..9a2129af
 + metadata(current);metadata(previous);
 + // Stationary cars and pedestrians keep temporal history, including under camera jitter.
 + for(int y=0;y<16;y++)for(int x=4;x<28;x++){current[index(x,y)+2]=previous[index(x,y)+2]=-17;velocity[index(x,y)+3]=1;}
-+ for(float jitter:{0.f,.25f/32,-.25f/32}){run(1,jitter);expect(12,8,0);expect(20,8,0);}
++ for(float tag:{1.f,-.9999123f}){for(int y=0;y<16;y++)for(int x=4;x<28;x++)velocity[index(x,y)+3]=tag;for(float jitter:{0.f,.25f/32,-.25f/32}){run(1,jitter);expect(12,8,0);expect(20,8,0);}}
 + // A moving car retains its own reprojected history; exposed background rejects the old car.
 + metadata(current);metadata(previous);velocity=zero;
 + current[index(20)+2]=-17;previous[index(12)+2]=-17;previous[index(12)+1]=.4f;
-+ velocity[index(20)]=.25f;velocity[index(20)+3]=1;
++ velocity[index(20)]=.25f;velocity[index(20)+3]=-.9999123f;
 + run(1);expect(20,8,0);expect(12,8,1);expect(3,8,0);
 + // Two actors crossing the same pixel cannot share motion history.
 + metadata(current);metadata(previous);velocity=zero;current[index(16)+2]=37;previous[index(16)+2]=43;velocity[index(16)+3]=2;run(1);expect(16,8,1);
@@ -16339,7 +16464,7 @@ index 00000000..9a2129af
 + run(0);expect(16,8,0);
 + // Exercise production metadata generation, including exact signed owner tags.
 + auto mask=program(extract(source,"rsMfxMaskSrc"));glUseProgram(mask);sampler(mask,"velTex",3);sampler(mask,"depthTex",1);sampler(mask,"colorTex",0);sampler(mask,"dynShadow",2);glUniform2f(glGetUniformLocation(mask,"lowSize"),32,16);
-+ velocity=zero;shadow=zero;velocity[index(8)+2]=-17;velocity[index(8)+3]=1;velocity[index(20)+2]=37;velocity[index(20)+3]=2;shadow[index(16)+1]=1;upload(tex[3],3,velocity);upload(tex[2],2,shadow);glDrawBuffers(1,bufs);glDrawArrays(GL_TRIANGLES,0,3);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(0,0,32,16,GL_RGBA,GL_FLOAT,out.data());
++ velocity=zero;shadow=zero;velocity[index(8)+2]=-17;velocity[index(8)+3]=-.9999123f;velocity[index(20)+2]=37;velocity[index(20)+3]=2;shadow[index(16)+1]=1;upload(tex[3],3,velocity);upload(tex[2],2,shadow);glDrawBuffers(1,bufs);glDrawArrays(GL_TRIANGLES,0,3);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(0,0,32,16,GL_RGBA,GL_FLOAT,out.data());
 + error=fmaxf(error,fabsf(out[index(8)+2]+17));error=fmaxf(error,fabsf(out[index(20)+2]-37));expect(16,8,1);expect(8,8,0);checks+=2;
 + // Reactive edge AA remains available on disocclusions; stable surfaces are left to temporal AA.
 + metadata(current);metadata(previous);velocity=zero;
@@ -16534,7 +16659,7 @@ index 00000000..11147403
 +}}
 diff --git a/tools-mtl/msaa-levels-test.mm b/tools-mtl/msaa-levels-test.mm
 new file mode 100644
-index 00000000..527394ad
+index 00000000..30ee643c
 --- /dev/null
 +++ b/tools-mtl/msaa-levels-test.mm
 @@ -0,0 +1,44 @@
@@ -16553,13 +16678,13 @@ index 00000000..527394ad
 +#define LD(n) m_##n=(decltype(m_##n))mtlglGetProcAddress(#n)
 + LD(glCreateShader);LD(glShaderSource);LD(glCompileShader);LD(glCreateProgram);LD(glAttachShader);LD(glLinkProgram);LD(glUseProgram);LD(glGetProgramiv);LD(glGenVertexArrays);LD(glBindVertexArray);LD(glViewport);LD(glClearColor);LD(glClear);LD(glDrawArrays);LD(glReadPixels);LD(glGenTextures);LD(glBindTexture);LD(glTexImage2D);LD(glTexParameteri);LD(glActiveTexture);LD(glDisable);LD(glEnable);LD(glGenFramebuffers);LD(glBindFramebuffer);LD(glFramebufferTexture2D);LD(glDrawBuffers);
 + const char *vs="#version 330\nvoid main(){vec2 p[3]=vec2[3](vec2(-.9,-.9),vec2(.9,-.55),vec2(-.7,.9));gl_Position=vec4(p[gl_VertexID],0,1);}";
-+ const char *fs="#version 330\nlayout(location=0)out vec4 c;layout(location=1)out vec4 v;layout(location=2)out vec4 r;void main(){c=vec4(1);v=vec4(.125,.25,-17,1);r=vec4(.25,.5,.75,.6);}";
++ const char *fs="#version 330\nlayout(location=0)out vec4 c;layout(location=1)out vec4 v;layout(location=2)out vec4 r;void main(){c=vec4(1);v=vec4(.125,.25,-7001,-gl_FragCoord.z);r=vec4(.25,.5,.75,.6);}";
 + GLuint a=m_glCreateShader(GL_VERTEX_SHADER),b=m_glCreateShader(GL_FRAGMENT_SHADER);m_glShaderSource(a,1,&vs,nullptr);m_glCompileShader(a);m_glShaderSource(b,1,&fs,nullptr);m_glCompileShader(b);GLuint program=m_glCreateProgram();m_glAttachShader(program,a);m_glAttachShader(program,b);m_glLinkProgram(program);GLint linked;m_glGetProgramiv(program,GL_LINK_STATUS,&linked);assert(linked);m_glUseProgram(program);GLuint vao;m_glGenVertexArrays(1,&vao);m_glBindVertexArray(vao);m_glDisable(GL_BLEND);m_glDisable(GL_CULL_FACE);m_glEnable(GL_DEPTH_TEST);m_glViewport(0,0,48,48);
 + const char *backVS="#version 330\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2-1,.5,1);}";
-+ const char *backFS="#version 330\nlayout(location=0)out vec4 c;layout(location=1)out vec4 v;layout(location=2)out vec4 r;void main(){c=vec4(0,0,1,1);v=vec4(0,0,-29,1);r=vec4(.25,.5,.75,.6);}";
++ const char *backFS="#version 330\nlayout(location=0)out vec4 c;layout(location=1)out vec4 v;layout(location=2)out vec4 r;void main(){c=vec4(0,0,1,1);v=vec4(0,0,-7002,-gl_FragCoord.z);r=vec4(.25,.5,.75,.6);}";
 + GLuint av=m_glCreateShader(GL_VERTEX_SHADER),bf=m_glCreateShader(GL_FRAGMENT_SHADER);m_glShaderSource(av,1,&backVS,nullptr);m_glCompileShader(av);m_glShaderSource(bf,1,&backFS,nullptr);m_glCompileShader(bf);GLuint back=m_glCreateProgram();m_glAttachShader(back,av);m_glAttachShader(back,bf);m_glLinkProgram(back);
 + GLuint fbo,t[4];m_glGenFramebuffers(1,&fbo);m_glBindFramebuffer(GL_FRAMEBUFFER,fbo);m_glGenTextures(4,t);GLenum buffers[]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1,GL_COLOR_ATTACHMENT2};
-+ auto targets=[&](int size){for(int i=0;i<4;i++){m_glBindTexture(GL_TEXTURE_2D,t[i]);m_glTexImage2D(GL_TEXTURE_2D,0,i==3?GL_DEPTH32F_STENCIL8:i==0?GL_RGBA8:GL_RGBA16F,size,size,0,i==3?GL_DEPTH_STENCIL:GL_RGBA,i==3?GL_FLOAT_32_UNSIGNED_INT_24_8_REV:GL_HALF_FLOAT,nullptr);m_glFramebufferTexture2D(GL_FRAMEBUFFER,i==3?GL_DEPTH_STENCIL_ATTACHMENT:buffers[i],GL_TEXTURE_2D,t[i],0);}m_glDrawBuffers(3,buffers);};targets(48);
++ auto targets=[&](int size){for(int i=0;i<4;i++){m_glBindTexture(GL_TEXTURE_2D,t[i]);m_glTexImage2D(GL_TEXTURE_2D,0,i==3?GL_DEPTH32F_STENCIL8:i==0?GL_RGBA8:i==1?GL_RGBA32F:GL_RGBA16F,size,size,0,i==3?GL_DEPTH_STENCIL:GL_RGBA,i==3?GL_FLOAT_32_UNSIGNED_INT_24_8_REV:i==1?GL_FLOAT:GL_HALF_FLOAT,nullptr);m_glFramebufferTexture2D(GL_FRAMEBUFFER,i==3?GL_DEPTH_STENCIL_ATTACHMENT:buffers[i],GL_TEXTURE_2D,t[i],0);}m_glDrawBuffers(3,buffers);};targets(48);
 + std::vector<unsigned char> px(48*48*4);int partial[3]={};int run=0;
 + for(int count:{1,2,4}){
 +  assert(mtlglBeginSceneMSAA(fbo,count)==count);m_glClearColor(0,0,0,0);m_glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);m_glUseProgram(back);m_glDrawArrays(GL_TRIANGLES,0,3);m_glUseProgram(program);m_glDrawArrays(GL_TRIANGLES,0,3);
@@ -16568,8 +16693,8 @@ index 00000000..527394ad
 +  assert(mtlglResolveSceneMSAA(fbo));m_glReadPixels(0,0,48,48,GL_RGBA,GL_UNSIGNED_BYTE,px.data());
 +  for(int i=0;i<48*48;i++)if(px[i*4]>0 && px[i*4]<255)partial[run]++;
 +  char imagePath[80];snprintf(imagePath,sizeof(imagePath),"/tmp/regta-msaa-%dx.ppm",count);if(FILE *image=fopen(imagePath,"wb")){fprintf(image,"P6\n48 48\n255\n");for(int i=0;i<48*48;i++)fwrite(&px[i*4],1,3,image);fclose(image);}
-+  id<MTLTexture> velocity=(__bridge id<MTLTexture>)mtlglTexture(t[1]);std::vector<__fp16> raw(48*48*4);[velocity getBytes:raw.data() bytesPerRow:48*8 fromRegion:MTLRegionMake2D(0,0,48,48) mipmapLevel:0];
-+  int marked=0;for(int i=0;i<48*48;i++)if(raw[i*4+3]>.5f){assert(float(raw[i*4+2])==(px[i*4]>0?-17.f:-29.f));marked++;}
++  id<MTLTexture> velocity=(__bridge id<MTLTexture>)mtlglTexture(t[1]);std::vector<float> raw(48*48*4);[velocity getBytes:raw.data() bytesPerRow:48*16 fromRegion:MTLRegionMake2D(0,0,48,48) mipmapLevel:0];
++  int marked=0;for(int i=0;i<48*48;i++)if(raw[i*4+3]<0.f){assert(raw[i*4+2]==(px[i*4]>0?-7001.f:-7002.f));assert(raw[i*4+3]==(px[i*4]>0?-.5f:-.75f));marked++;}
 +  id<MTLTexture> reflection=(__bridge id<MTLTexture>)mtlglTexture(t[2]);std::vector<__fp16> reflected(raw.size());[reflection getBytes:reflected.data() bytesPerRow:48*8 fromRegion:MTLRegionMake2D(0,0,48,48) mipmapLevel:0];int partialCoats=0;for(int i=0;i<48*48;i++)if(px[i*4]>0 && px[i*4]<255){assert(float(reflected[i*4+3])<.59f);partialCoats++;}assert(partialCoats==partial[run]);
 +  assert(marked>200);printf("Native %dx MSAA: %d partial coverage pixels; %d exact owner tags retained across encoder break.\n",count,partial[run],marked);run++;
 + }
@@ -16624,6 +16749,58 @@ index 00000000..42d79afc
 + assert(partial[0]==0 && partial[1]>25 && partial[2]>partial[1]);
 + targets(32);m_glViewport(0,0,32,32);assert(mtlglBeginSceneMSAA(fbo,2)==2);m_glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);m_glUseProgram(back);m_glDrawArrays(GL_TRIANGLES,0,3);m_glUseProgram(program);m_glDrawArrays(GL_TRIANGLES,0,3);assert(mtlglResolveSceneMSAA(fbo));
 + printf("MSAA resize and 1x/2x/4x pipeline transitions passed.\n");return 0;
++}
+diff --git a/tools-mtl/reflection-composite-test.cpp b/tools-mtl/reflection-composite-test.cpp
+new file mode 100644
+index 00000000..d29a3f91
+--- /dev/null
++++ b/tools-mtl/reflection-composite-test.cpp
+@@ -0,0 +1,46 @@
++// Hidden-window test of the actual vehicle shaders and final ray-reflection composite.
++// clang++ -std=c++17 tools-mtl/vehicle-paint-reflection-test.cpp -I/opt/homebrew/include \
++//   -L/opt/homebrew/lib -lglfw -framework OpenGL -o /tmp/vehicle-paint-reflection-test
++// Run from the repository root; optional arguments select old vertex/fragment shader snapshots.
++#define GL_SILENCE_DEPRECATION
++#define GLFW_INCLUDE_NONE
++#include <GLFW/glfw3.h>
++#include "glad/glad.h"
++#include "mtlgl.h"
++#include <cstdlib>
++#include <fstream>
++#include <iterator>
++#include <string>
++#include <vector>
++#include <cassert>
++#include <cstring>
++#include <cstdio>
++#include <cmath>
++
++static void testAttrib4(GLuint i,float x,float y,float z,float w){
++ float a[]={x,y,z,w,x,y,z,w,x,y,z,w};GLuint b;glGenBuffers(1,&b);glBindBuffer(GL_ARRAY_BUFFER,b);glBufferData(GL_ARRAY_BUFFER,sizeof(a),a,GL_STATIC_DRAW);glEnableVertexAttribArray(i);glVertexAttribPointer(i,4,GL_FLOAT,GL_FALSE,0,nullptr);
++}
++static void testAttrib3(GLuint i,float x,float y,float z){testAttrib4(i,x,y,z,1);}
++static std::string read(const char *p){std::ifstream f(p);std::string s((std::istreambuf_iterator<char>(f)),{});assert(!s.empty());return s;}
++static GLuint shader(GLenum type,const std::string &s){GLuint sh=glCreateShader(type);const char *p=s.c_str();glShaderSource(sh,1,&p,nullptr);glCompileShader(sh);GLint ok;glGetShaderiv(sh,GL_COMPILE_STATUS,&ok);if(!ok){char log[8192];glGetShaderInfoLog(sh,sizeof(log),nullptr,log);puts(log);}assert(ok);return sh;}
++static GLuint program(const std::string &v,const std::string &f){GLuint p=glCreateProgram();glAttachShader(p,shader(GL_VERTEX_SHADER,v));glAttachShader(p,shader(GL_FRAGMENT_SHADER,f));glLinkProgram(p);GLint ok;glGetProgramiv(p,GL_LINK_STATUS,&ok);assert(ok);return p;}
++static std::string extract(const std::string &s,const char *name){std::string mark=std::string("static const char *")+name+" =";size_t start=s.find(mark);assert(start!=std::string::npos);std::string r;bool q=false;for(size_t i=start+mark.size();i<s.size();i++){char c=s[i];if(!q&&c==';')break;if(c=='"'){q=!q;continue;}if(!q)continue;if(c=='\\'){c=s[++i];if(c=='n')c='\n';else if(c=='t')c='\t';}r+=c;}return r;}
++static void texture(GLuint t,int unit,GLenum target,const float *p,int w=32,int h=32){glActiveTexture(GL_TEXTURE0+unit);glBindTexture(target,t);glTexImage2D(target,0,GL_RGBA32F,w,h,0,GL_RGBA,GL_FLOAT,p);glTexParameteri(target,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(target,GL_TEXTURE_MAG_FILTER,GL_NEAREST);glTexParameteri(target,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(target,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);}
++
++extern "C" int reflectionCompositeTest(int,char**){
++ assert(mtlglInit(nullptr,32,16));assert(gladLoadGLLoader((GLADloadproc)mtlglGetProcAddress,33));
++ auto src=read("vendor/librw/src/gl/gl3device.cpp");auto p=program(extract(src,"rsVertSrc"),extract(src,"rsRTCompositeSrc"));
++ GLuint vao;glGenVertexArrays(1,&vao);glBindVertexArray(vao);GLuint tex[4],fbo;glGenTextures(4,tex);glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);
++ texture(tex[0],0,GL_TEXTURE_2D,nullptr,32,16);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tex[0],0);assert(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
++ std::vector<float> ray(32*16*4),refl(ray.size()),vel(ray.size()),out(ray.size());
++ glUseProgram(p);glUniform1i(glGetUniformLocation(p,"rtTex"),0);glUniform1i(glGetUniformLocation(p,"reflTex"),1);glUniform1i(glGetUniformLocation(p,"velTex"),2);glUniform1i(glGetUniformLocation(p,"div"),1);glUniform1f(glGetUniformLocation(p,"strength"),.5f);glViewport(0,0,32,16);
++ // Ground, static glass, current-depth cars and peds occupy adjacent regions. A changed ray
++ // must replace the old reflection immediately, preserving each material's strength.
++ for(int frame=0;frame<2;frame++){
++  for(int y=0;y<16;y++)for(int x=0;x<32;x++){int k=(y*32+x)*4;ray[k]=frame?0:1;ray[k+1]=frame?1:0;ray[k+3]=1;refl[k+3]=.6f;vel[k+2]=x<8?1:0;vel[k+3]=x<16?0:(x<24?-.9999123f:2);}
++  texture(tex[1],0,GL_TEXTURE_RECTANGLE,ray.data(),32,16);texture(tex[2],1,GL_TEXTURE_2D,refl.data(),32,16);texture(tex[3],2,GL_TEXTURE_2D,vel.data(),32,16);
++  glClearColor(.2f,.2f,.2f,1);glClear(GL_COLOR_BUFFER_BIT);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);glReadPixels(0,0,32,16,GL_RGBA,GL_FLOAT,out.data());
++  for(int y=0;y<16;y++)for(int x=0;x<32;x++){int k=(y*32+x)*4;float a=x<8?.3f:(x<24?.6f:0);for(int c=0;c<3;c++){float expected=.2f*(1-a)+(c==frame?a:0);assert(fabsf(out[k+c]-expected)<1e-5f);}}
++ }
++ assert(glGetError()==GL_NO_ERROR);puts("PASS current-frame Metal reflection blend: wet roads, static glass, vehicle pane tags, pedestrian exclusion, unchanged material weights; red-to-green change contains no stale reflected colour.");fflush(stdout);_Exit(0);
 +}
 diff --git a/tools-mtl/rt-instance-test.mm b/tools-mtl/rt-instance-test.mm
 new file mode 100644
@@ -16751,12 +16928,22 @@ index 00000000..6c8518c1
 +  printf("Shadow/light GPU comparison: max error %.9g, baseline %.3f ms, optimized %.3f ms (synthetic 512x256 scene)\n",maxError,timings[0],timings[1]);assert(maxError<1e-5f);
 + }
 +}
+diff --git a/tools-mtl/rt-ped-native-test.mm b/tools-mtl/rt-ped-native-test.mm
+new file mode 100644
+index 00000000..e60d320d
+--- /dev/null
++++ b/tools-mtl/rt-ped-native-test.mm
+@@ -0,0 +1,4 @@
++#define main rtPedFixtureMain
++#include "rt-ped-reflections-test.mm"
++#undef main
++extern "C" int pedReflectionsTest(int,char**){int result=rtPedFixtureMain();fflush(stdout);_Exit(result);}
 diff --git a/tools-mtl/rt-ped-reflections-test.mm b/tools-mtl/rt-ped-reflections-test.mm
 new file mode 100644
-index 00000000..06820cac
+index 00000000..c36dd1c5
 --- /dev/null
 +++ b/tools-mtl/rt-ped-reflections-test.mm
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,132 @@
 +// clang++ -std=c++17 -fobjc-arc -Ivendor/librw tools-mtl/rt-ped-reflections-test.mm \
 +//   -framework Metal -framework Foundation -framework IOSurface -framework OpenGL -o /tmp/rt-ped-reflections-test
 +// MTL_DEBUG_LAYER=1 /tmp/rt-ped-reflections-test
@@ -16770,7 +16957,12 @@ index 00000000..06820cac
 + float fogDistance;uint32_t width,height,hasDynamic;
 + float toSun[3],sunVisibility,shadowDistance;uint32_t frame,pad4,pad5;
 + float prevVP[16];uint32_t histValid,pad6,pad7,pad8;
++ float camera[3];uint32_t shaftQuality;
 +};
++// The game path is asynchronous; direct CPU readback must wait for its queue.
++static int traceAndWait(const float *matrix,const MrtEnvironment *environment){
++ int ok=mrtTrace(matrix,environment);auto fence=[S.queue commandBuffer];[fence commit];[fence waitUntilCompleted];assert(fence.status==MTLCommandBufferStatusCompleted);return ok;
++}
 +int main(){@autoreleasepool {
 + S.device=MTLCreateSystemDefaultDevice();assert(S.device&&[S.device supportsRaytracing]);S.queue=[S.device newCommandQueue];S.tempBuffers=[NSMutableArray array];S.ready=true;S.frame=100;
 + S.colourBuf=[S.device newBufferWithLength:kMaxColours*16 options:MTLResourceStorageModeShared];S.firstColourBuf=[S.device newBufferWithLength:kMaxGeometries*4 options:MTLResourceStorageModeShared];
@@ -16797,7 +16989,7 @@ index 00000000..06820cac
 +  std::vector<std::pair<int,const float*>> instances;for(int id:ids)instances.push_back({S.geoms[id].first,identity});id<MTLBuffer> geom;std::vector<int> used;auto scene=buildScene(instances,&geom,used);assert(scene);closeBuild(true);
 +  memcpy(S.colourBuf.contents,S.colours.data(),S.colours.size()*sizeof(float));memcpy(S.firstColourBuf.contents,S.firstColour.data(),S.firstColour.size()*sizeof(uint32_t));
 +  TestUniforms u={};memcpy(u.invVP,identity,64);u.invVP[12]=x;u.invVP[13]=y;u.width=u.height=u.hasDynamic=1;u.maxDistance=100;u.fogDistance=100;u.skyTop[0]=.2f;u.skyTop[1]=.3f;u.skyTop[2]=.9f;u.ambient[0]=u.ambient[1]=u.ambient[2]=.2f;
-+  auto cb=[S.queue commandBuffer];auto enc=[cb computeCommandEncoder];[enc setComputePipelineState:pipeline];for(int i=0;i<3;i++)[enc setTexture:tex[i] atIndex:i];[enc setTexture:tex[0] atIndex:3];[enc setTexture:tex[0] atIndex:4];[enc setAccelerationStructure:staticAS atBufferIndex:0];[enc setAccelerationStructure:scene atBufferIndex:1];[enc setBytes:&u length:sizeof(u) atIndex:2];[enc setBuffer:S.colourBuf offset:0 atIndex:3];[enc setBuffer:S.firstColourBuf offset:0 atIndex:4];[enc setBuffer:staticGeom offset:0 atIndex:5];[enc setBuffer:geom offset:0 atIndex:6];[enc setBuffer:S.firstColourBuf offset:0 atIndex:8];for(auto b:S.blas)[enc useResource:b usage:MTLResourceUsageRead];[enc dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[enc endEncoding];[cb commit];[cb waitUntilCompleted];assert(cb.status==MTLCommandBufferStatusCompleted);std::array<float,4> pixel;[tex[2] getBytes:pixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];S.gpuBytes-=scene.size;[S.tempBuffers removeAllObjects];return pixel;
++  auto cb=[S.queue commandBuffer];auto enc=[cb computeCommandEncoder];[enc setComputePipelineState:pipeline];for(int i=0;i<3;i++)[enc setTexture:tex[i] atIndex:i];[enc setTexture:tex[0] atIndex:3];[enc setTexture:tex[0] atIndex:4];[enc setTexture:tex[0] atIndex:5];[enc setAccelerationStructure:staticAS atBufferIndex:0];[enc setAccelerationStructure:scene atBufferIndex:1];[enc setBytes:&u length:sizeof(u) atIndex:2];[enc setBuffer:S.colourBuf offset:0 atIndex:3];[enc setBuffer:S.firstColourBuf offset:0 atIndex:4];[enc setBuffer:staticGeom offset:0 atIndex:5];[enc setBuffer:geom offset:0 atIndex:6];[enc setBuffer:S.firstColourBuf offset:0 atIndex:8];for(auto b:S.blas)[enc useResource:b usage:MTLResourceUsageRead];[enc dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[enc endEncoding];[cb commit];[cb waitUntilCompleted];assert(cb.status==MTLCommandBufferStatusCompleted);std::array<float,4> pixel;[tex[2] getBytes:pixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];S.gpuBytes-=scene.size;[S.tempBuffers removeAllObjects];return pixel;
 + };
 + pose(0,0);int first=mrtAddAnimatedGeometry(42,posed,3,1,indices,&count,red);assert(first>=0);auto p=sample({first},0,0);assert(p[0]>p[2]*2);assert(S.geomMask[S.geoms[first].first]==1&&S.geoms[first].second==-1);
 + mrtFrameBegin();pose(3,0);assert(mrtAddAnimatedGeometry(42,posed,3,1,indices,&count,red)==first);p=sample({first},0,0);assert(p[2]>p[0]*2);p=sample({first},3,0);assert(p[0]>p[2]*2);
@@ -16820,14 +17012,14 @@ index 00000000..06820cac
 + mrtFrameBegin();assert(mrtAddAnimatedGeometry(1159,posed,3,1,otherIndices,&count,red)==recycled);assert(S.replaceColourBuffer);
 + mrtAddInstance(recycled,identity,1159,1);
 + MrtEnvironment env={};env.maxDistance=env.fogDistance=100;env.skyTop[0]=.2f;env.skyTop[1]=.3f;env.skyTop[2]=.9f;
-+ assert(mrtTrace(identity,&env));assert(S.colourBuf!=priorColour);assert(((float*)priorColour.contents)[colourOffset+1]==priorGreen);
++ assert(traceAndWait(identity,&env));assert(S.colourBuf!=priorColour);assert(((float*)priorColour.contents)[colourOffset+1]==priorGreen);
 + std::array<float,4> finalPixel;[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[2]*2);
 + // Ordinary rigid vehicle meshes participate even without a screen draw callback. Two cars sharing
 + // one model retain independent placement, and drawing/scene collection must not duplicate their parts.
 + mrtFrameBegin();int car=mrtAddGeometry(rest,3,1,indices,&count,green,&cast);assert(car>=0);
 + float carA[16],carB[16],view[16];memcpy(carA,identity,64);memcpy(carB,identity,64);carA[12]=6;carB[12]=-6;
 + mrtAddInstance(car,carA,7001,1);mrtAddInstance(car,carB,7002,1);mrtAddInstance(car,carA,7001,1);assert(S.dynamics.size()==2);
-+ auto vehicleRay=[&](float x,bool hit){memcpy(view,identity,64);view[12]=x;assert(mrtTrace(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];if(hit)assert(finalPixel[1]>finalPixel[0]*2);else assert(finalPixel[2]>finalPixel[0]*2);};
++ auto vehicleRay=[&](float x,bool hit){memcpy(view,identity,64);view[12]=x;assert(traceAndWait(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];if(hit)assert(finalPixel[1]>finalPixel[0]*2);else assert(finalPixel[2]>finalPixel[0]*2);};
 + vehicleRay(6,true);vehicleRay(-6,true);
 + mrtFrameBegin();carA[12]=9;mrtAddInstance(car,carA,7001,1);vehicleRay(6,false);vehicleRay(9,true);vehicleRay(-6,false);
 + // Own interior lies directly in front of the ray, with another car only 4 cm behind it.
@@ -16836,20 +17028,20 @@ index 00000000..06820cac
 + memcpy(carA,identity,64);memcpy(carB,identity,64);carB[14]=.04f;
 + mrtAddVehicleInstance(interior,carA,8001,17);mrtAddVehicleInstance(car,carB,8002,18);
 + depth[3]=17;[tex[0] replaceRegion:region mipmapLevel:0 withBytes:depth bytesPerRow:16];
-+ assert(mrtTrace(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[0]*2);
++ assert(traceAndWait(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[0]*2);
 + depth[3]=0;[tex[0] replaceRegion:region mipmapLevel:0 withBytes:depth bytesPerRow:16];
-+ assert(mrtTrace(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[1]*2);
++ assert(traceAndWait(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[1]*2);
 + // A receiver made of many parts must skip all its interior layers, then see sky if nothing else is behind.
 + mrtFrameBegin();for(int layer=0;layer<70;layer++){carA[14]=layer*.01f;mrtAddVehicleInstance(interior,carA,9000+layer,17);}
 + depth[3]=17;[tex[0] replaceRegion:region mipmapLevel:0 withBytes:depth bytesPerRow:16];
-+ assert(mrtTrace(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[2]>finalPixel[0]*2);
++ assert(traceAndWait(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[2]>finalPixel[0]*2);
 + // Visible ray hits use current textured pixels, while occluded hits reject foreground colour.
 + mrtFrameBegin();mrtAddVehicleInstance(car,identity,10001,18);depth[3]=0;[tex[0] replaceRegion:region mipmapLevel:0 withBytes:depth bytesPerRow:16];
 + auto sceneDesc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:1 height:1 mipmapped:NO];sceneDesc.storageMode=MTLStorageModeShared;sceneDesc.usage=MTLTextureUsageShaderRead;
 + S.sceneColour=[S.device newTextureWithDescriptor:sceneDesc];S.sceneDepth=[S.device newTextureWithDescriptor:sceneDesc];
 + float blueSurface[]={.05f,.25f,.9f,1},visibleDepth[]={.6f,0,0,0};[S.sceneColour replaceRegion:region mipmapLevel:0 withBytes:blueSurface bytesPerRow:16];[S.sceneDepth replaceRegion:region mipmapLevel:0 withBytes:visibleDepth bytesPerRow:16];
-+ memcpy(view,identity,64);view[10]=10;assert(mrtTrace(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(fabsf(finalPixel[2]-.9f)<.001f);
-+ visibleDepth[0]=.4f;[S.sceneDepth replaceRegion:region mipmapLevel:0 withBytes:visibleDepth bytesPerRow:16];assert(mrtTrace(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[2]*2);
++ memcpy(view,identity,64);view[10]=10;assert(traceAndWait(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(fabsf(finalPixel[2]-.9f)<.001f);
++ visibleDepth[0]=.4f;[S.sceneDepth replaceRegion:region mipmapLevel:0 withBytes:visibleDepth bytesPerRow:16];assert(traceAndWait(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[2]*2);
 + S.sceneColour=nil;S.sceneDepth=nil;
 + // Direct triangle UV/material sampling works with no scene image, including off-screen hits.
 + float uv[]={.25f,.25f,.25f,.25f,.25f,.25f},tint[]={1,1,1,1};unsigned textureName=0;uint32_t paintChannel=0;
@@ -16857,7 +17049,7 @@ index 00000000..06820cac
 + auto textureDesc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:2 height:2 mipmapped:NO];textureDesc.storageMode=MTLStorageModeShared;textureDesc.usage=MTLTextureUsageShaderRead;
 + auto checker=[S.device newTextureWithDescriptor:textureDesc];float checkerPixels[]={1,0,0,1, 0,1,0,1, 0,0,1,1, 1,1,0,1};[checker replaceRegion:MTLRegionMake2D(0,0,2,2) mipmapLevel:0 withBytes:checkerPixels bytesPerRow:32];
 + uint32_t surfaceIndex=S.firstColour[S.geoms[car].first];S.surfaces[surfaceIndex].albedo=checker;S.surfaces[surfaceIndex].flags=1;
-+ assert(mrtTrace(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[2]>finalPixel[0]*2 && finalPixel[2]>finalPixel[1]*2);
++ assert(traceAndWait(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[2]>finalPixel[0]*2 && finalPixel[2]>finalPixel[1]*2);
 + // Residency cache matches exactly the live argument-buffer resources and survives unchanged frames.
 + auto checkResidency=[&](){std::unordered_set<void*> expected,actual;
 +  for(const auto &surface:S.surfaces)for(id<MTLResource> r:{(id<MTLResource>)surface.uv,(id<MTLResource>)surface.albedo})if(r)expected.insert((__bridge void*)r);
@@ -16865,19 +17057,19 @@ index 00000000..06820cac
 +  assert(expected==actual);
 + };
 + checkResidency();auto stableArguments=S.surfaceBuffer;auto oldUV=S.surfaces[surfaceIndex].uv;
-+ assert(mrtTrace(identity,&env));assert(S.surfaceBuffer==stableArguments);checkResidency();
++ assert(traceAndWait(identity,&env));assert(S.surfaceBuffer==stableArguments);checkResidency();
 + auto oldArguments=S.surfaceBuffer;
 + for(float &v:uv)v=.75f;mrtSetGeometrySurfaces(car,2,uv,1,indices,&count,&textureName,tint,&paintChannel);S.surfaces[surfaceIndex].albedo=checker;S.surfaces[surfaceIndex].flags=1;
-+ assert(mrtTrace(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[0]*2 && finalPixel[1]>finalPixel[2]*2);assert(S.surfaceBuffer!=oldArguments);checkResidency();
++ assert(traceAndWait(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[0]*2 && finalPixel[1]>finalPixel[2]*2);assert(S.surfaceBuffer!=oldArguments);checkResidency();
 + for(id<MTLResource> r:S.surfaceResources)assert(r!=oldUV);
 + // Two instances sharing one model keep their own paint colours in the reflection.
 + paintChannel=1;mrtSetGeometrySurfaces(car,3,uv,1,indices,&count,&textureName,tint,&paintChannel);
 + mrtFrameBegin();memcpy(carA,identity,64);memcpy(carB,identity,64);carB[12]=6;
 + mrtAddVehicleInstance(car,carA,11001,18);mrtSetVehicleInstanceColours(11001,0xFF0000FFu,0xFF00FF00u);
 + mrtAddVehicleInstance(car,carB,11002,19);mrtSetVehicleInstanceColours(11002,0xFF00FF00u,0xFF0000FFu);
-+ assert(mrtTrace(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[1]*2);
-+ memcpy(view,identity,64);view[12]=6;assert(mrtTrace(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[0]*2);
-+ paintChannel=2;mrtSetGeometrySurfaces(car,4,uv,1,indices,&count,&textureName,tint,&paintChannel);assert(mrtTrace(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[1]*2);
++ assert(traceAndWait(identity,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[1]*2);
++ memcpy(view,identity,64);view[12]=6;assert(traceAndWait(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[1]>finalPixel[0]*2);
++ paintChannel=2;mrtSetGeometrySurfaces(car,4,uv,1,indices,&count,&textureName,tint,&paintChannel);assert(traceAndWait(view,&env));[tex[2] getBytes:finalPixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];assert(finalPixel[0]>finalPixel[1]*2);
 + printf("Direct material ray tests passed: off-screen UV checker samples, argument-buffer replacement, shared geometry with independent primary/secondary paint.\n");
 + printf("Visible-hit surface shading passed: textured blue hit replaces flat green geometry; foreground depth rejects blue leakage.\n");
 + printf("Vehicle ownership tests passed: own interior excluded, different car retained 4cm behind, unowned rays unchanged, 70 self layers reach sky.\n");
@@ -16948,6 +17140,87 @@ index 00000000..9ede395c
 + }
 + glfwMakeContextCurrent(gGl);reactive(false,gl);reactive(true,metal);maxError=0;int blended=0;for(size_t i=0;i<gl.size();i++){maxError=std::max(maxError,abs(int(gl[i])-int(metal[i])));if(i%4==0 && metal[i]>0 && metal[i]<255)blended++;}printf("Actual reactive spatial AA: Metal versus reference max error %d; %d intermediate edge pixels\n",maxError,blended);return compositeError<=1 && maxError<=1 && blended>40?0:2;
 +}
+diff --git a/tools-mtl/rt-reflection-receiver-test.mm b/tools-mtl/rt-reflection-receiver-test.mm
+new file mode 100644
+index 00000000..79537844
+--- /dev/null
++++ b/tools-mtl/rt-reflection-receiver-test.mm
+@@ -0,0 +1,37 @@
++// Execute the production reflection kernel with glass in front of a different opaque depth.
++#include "../src/extras/metalfx/MetalRT.cpp"
++#include <cassert>
++#include <cmath>
++struct TestUniforms {
++ float invVP[16];float skyTop[3],pad0,skyHorizon[3],pad1,ambient[3],pad2,sunDir[3],pad3,sunColor[3],maxDistance;
++ float fogDistance;uint32_t width,height,hasDynamic;float toSun[3],sunVisibility,shadowDistance;uint32_t frame,pad4,pad5;
++ float prevVP[16];uint32_t histValid,pad6,pad7,pad8;float camera[3];uint32_t shaftQuality;
++};
++extern "C" int reflectionReceiverTest(int,char**){@autoreleasepool{
++ S.device=MTLCreateSystemDefaultDevice();assert(S.device);S.queue=[S.device newCommandQueue];S.tempBuffers=[NSMutableArray array];S.ready=true;
++ S.colourBuf=[S.device newBufferWithLength:kMaxColours*16 options:MTLResourceStorageModeShared];
++ S.firstColourBuf=[S.device newBufferWithLength:kMaxGeometries*4 options:MTLResourceStorageModeShared];
++ float identity[]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
++ float vertices[]={-2,-2,.4f,2,-2,.4f,0,2,.4f};uint32_t idx[]={0,1,2};const uint32_t *meshes[]={idx};int count=3,casts=1;float colour[]={1,.02f,.02f,1,1,1};
++ int meshId=mrtAddGeometry(vertices,3,1,meshes,&count,colour,&casts);assert(meshId>=0);
++ id<MTLBuffer> geom;std::vector<int> used;auto scene=buildScene({{S.geoms[meshId].first,identity}},&geom,used);closeBuild(true);assert(scene);
++ memcpy(S.colourBuf.contents,S.colours.data(),S.colours.size()*sizeof(float));memcpy(S.firstColourBuf.contents,S.firstColour.data(),S.firstColour.size()*sizeof(uint32_t));
++ NSError *error=nil;auto lib=[S.device newLibraryWithSource:[NSString stringWithUTF8String:kernelSource] options:nil error:&error];if(!lib){NSLog(@"%@",error);return 1;}
++ auto pipeline=[S.device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"traceReflections"] error:&error];assert(pipeline);
++ id<MTLTexture> tex[6];for(auto &t:tex){auto d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:1 height:1 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;t=[S.device newTextureWithDescriptor:d];assert(t);}
++ auto region=MTLRegionMake2D(0,0,1,1);float depth[]={.5f,.5f,.5f,0},dir[]={0,0,1,1};
++ [tex[0] replaceRegion:region mipmapLevel:0 withBytes:depth bytesPerRow:16];[tex[1] replaceRegion:region mipmapLevel:0 withBytes:dir bytesPerRow:16];
++ TestUniforms u={};memcpy(u.invVP,identity,64);u.width=u.height=1;u.maxDistance=u.fogDistance=100;u.skyTop[2]=1;u.skyHorizon[2]=1;u.ambient[0]=u.ambient[1]=u.ambient[2]=1;
++ auto run=[&](float alpha,bool enabled){float vel[]={0,0,-7001,alpha};[tex[5] replaceRegion:region mipmapLevel:0 withBytes:vel bytesPerRow:16];u.pad6=enabled;
++  auto cb=[S.queue commandBuffer];auto enc=[cb computeCommandEncoder];[enc setComputePipelineState:pipeline];for(int i=0;i<6;i++)[enc setTexture:tex[i] atIndex:i];
++  [enc setAccelerationStructure:scene atBufferIndex:0];[enc setAccelerationStructure:scene atBufferIndex:1];[enc setBytes:&u length:sizeof(u) atIndex:2];
++  [enc setBuffer:S.colourBuf offset:0 atIndex:3];[enc setBuffer:S.firstColourBuf offset:0 atIndex:4];[enc setBuffer:geom offset:0 atIndex:5];[enc setBuffer:geom offset:0 atIndex:6];[enc setBuffer:S.firstColourBuf offset:0 atIndex:8];
++  for(auto b:S.blas)[enc useResource:b usage:MTLResourceUsageRead];[enc dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[enc endEncoding];[cb commit];[cb waitUntilCompleted];assert(cb.status==MTLCommandBufferStatusCompleted);
++  std::array<float,4> pixel;[tex[2] getBytes:pixel.data() bytesPerRow:16 fromRegion:region mipmapLevel:0];for(float f:pixel)assert(std::isfinite(f));return pixel;
++ };
++ auto old=run(-.8f,false);assert(old[0]>old[2]*2);
++ auto pane=run(-.8f,true);assert(pane[2]>pane[0]*2);
++ for(float alpha:{0.f,1.f,2.f,-1.5f}){auto p=run(alpha,true);for(int c=0;c<4;c++)assert(fabsf(p[c]-old[c])<1e-6f);}
++ auto front=run(-.5f,true);for(int c=0;c<4;c++)assert(fabsf(front[c]-old[c])<1e-6f);
++ puts("PASS production Metal reflection rays originate on the pane rather than the opaque surface behind it; legacy/static/ped tags and invalid-depth fallback unchanged.");fflush(stdout);_Exit(0);
++}}
+diff --git a/tools-mtl/rt-scene-refit-test.mm b/tools-mtl/rt-scene-refit-test.mm
+new file mode 100644
+index 00000000..5e59df3c
+--- /dev/null
++++ b/tools-mtl/rt-scene-refit-test.mm
+@@ -0,0 +1,32 @@
++#include "../src/extras/metalfx/MetalRT.cpp"
++#include <cassert>
++#include <cmath>
++extern "C" int sceneRefitTest(int,char**){@autoreleasepool{
++ S.device=MTLCreateSystemDefaultDevice();S.queue=[S.device newCommandQueue];S.tempBuffers=[NSMutableArray array];S.ready=true;
++ float vertices[]={-.4f,-.4f,0,.4f,-.4f,0,.4f,.4f,0,-.4f,.4f,0};uint32_t indices[]={0,1,2,0,2,3};const uint32_t *meshes[]={indices};int count=6,casts=1;float colours[]={1,1,1,1,1,1};int geom=mrtAddGeometry(vertices,4,1,meshes,&count,colours,&casts);assert(geom>=0);closeBuild(true);
++ const int n=1024;std::vector<std::array<float,16>> transforms(n);std::vector<std::pair<int,const float*>> inst;std::vector<int> used;id<MTLBuffer> ids;
++ for(int i=0;i<n;i++){auto &m=transforms[i];m={1,0,0,0,0,1,0,0,0,0,1,0,float(i%32),float(i/32),0,1};inst.push_back({S.geoms[geom].first,m.data()});}
++ NSError *error=nil;const char *probe=R"MSL(
++#include <metal_stdlib>
++#include <metal_raytracing>
++using namespace metal;using namespace raytracing;
++kernel void hits(instance_acceleration_structure scene [[buffer(0)]],device float *out [[buffer(1)]],uint i [[thread_position_in_grid]]){
++ ray r;r.origin=float3(float(i%64)*.5f,float(i/64)*.5f,3);r.direction=float3(0,0,-1);r.min_distance=0;r.max_distance=10;
++ intersector<triangle_data,instancing> inter;inter.assume_geometry_type(geometry_type::triangle);auto h=inter.intersect(r,scene,1);
++ out[i]=h.type==intersection_type::triangle?h.distance:-1;
++}
++)MSL";
++ auto lib=[S.device newLibraryWithSource:[NSString stringWithUTF8String:probe] options:nil error:&error];assert(lib);auto pipeline=[S.device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"hits"] error:&error];assert(pipeline);
++ auto a=[S.device newBufferWithLength:4096*4 options:MTLResourceStorageModeShared],b=[S.device newBufferWithLength:4096*4 options:MTLResourceStorageModeShared];
++ auto shoot=[&](id<MTLAccelerationStructure> scene,id<MTLBuffer> out){auto cb=[S.queue commandBuffer];auto enc=[cb computeCommandEncoder];[enc setComputePipelineState:pipeline];[enc setAccelerationStructure:scene atBufferIndex:0];[enc setBuffer:out offset:0 atIndex:1];for(auto blas:S.blas)[enc useResource:blas usage:MTLResourceUsageRead];[enc dispatchThreads:MTLSizeMake(4096,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];[enc endEncoding];[cb commit];[cb waitUntilCompleted];assert(cb.status==MTLCommandBufferStatusCompleted);};
++ auto initial=buildScene(inst,&ids,used,nullptr,nullptr,nil,true);closeBuild(true);assert(initial);double buildMs=0,refitMs=0;
++ for(int phase=0;phase<20;phase++){
++  for(int i=0;i<n;i++){transforms[i][12]=float(i%32)+.2f*sinf(phase*.19f+i);transforms[i][14]=.25f*sinf(phase*.13f+i*.1f);}
++  auto rebuilt=buildScene(inst,&ids,used,nullptr,nullptr,nil,true);auto buildCB=S.buildCB;closeBuild(true);assert(buildCB.status==MTLCommandBufferStatusCompleted);buildMs+=(buildCB.GPUEndTime-buildCB.GPUStartTime)*1000;
++  auto refitted=buildScene(inst,&ids,used,nullptr,nullptr,initial,true);auto refitCB=S.buildCB;closeBuild(true);assert(refitCB.status==MTLCommandBufferStatusCompleted);refitMs+=(refitCB.GPUEndTime-refitCB.GPUStartTime)*1000;
++  assert(rebuilt && refitted);shoot(rebuilt,a);shoot(refitted,b);
++  auto pa=(float*)a.contents,pb=(float*)b.contents;for(int i=0;i<4096;i++)assert(fabsf(pa[i]-pb[i])<1e-5f);
++  initial=refitted;
++ }
++ assert(S.dynamicRefits==20);printf("PASS unchanged-layout dynamic TLAS refit matches fresh-build visibility/distance for 81,920 rays across moving instances.\nSynthetic 1024-instance GPU build %.3f ms, refit %.3f ms; no gameplay FPS claim.\n",buildMs/20,refitMs/20);fflush(stdout);_Exit(0);
++}}
 diff --git a/tools-mtl/rt-shadow-history-test.mm b/tools-mtl/rt-shadow-history-test.mm
 new file mode 100644
 index 00000000..b2735f02
@@ -17549,7 +17822,7 @@ index 00000000..e2727f9c
 + printf("failures: %d\n",fails); return fails; }
 diff --git a/tools-mtl/vehicle-glass-test.cpp b/tools-mtl/vehicle-glass-test.cpp
 new file mode 100644
-index 00000000..46feba02
+index 00000000..42d0c875
 --- /dev/null
 +++ b/tools-mtl/vehicle-glass-test.cpp
 @@ -0,0 +1,162 @@
@@ -17601,7 +17874,7 @@ index 00000000..46feba02
 +  glUniformMatrix4fv(glGetUniformLocation(p,"u_world"),1,GL_FALSE,world);glUniformMatrix4fv(glGetUniformLocation(p,"u_proj"),1,GL_FALSE,identity);glUniformMatrix4fv(glGetUniformLocation(p,"u_view"),1,GL_FALSE,identity);
 +  glUniform3f(glGetUniformLocation(p,"u_eye"),0,0,10);glUniform4f(glGetUniformLocation(p,"u_alphaRef"),0,2,0,0);glUniform4f(glGetUniformLocation(p,"u_fogData"),0,0,0,1);glUniform4f(glGetUniformLocation(p,"u_matColor"),.2f,.2f,.2f,1);glUniform4f(glGetUniformLocation(p,"u_ambLight"),1,1,1,1);glUniform4f(glGetUniformLocation(p,"u_surfProps"),1,0,0,0);glUniform4f(glGetUniformLocation(p,"u_reflProps"),.4f,1,.8f,1);glUniform1i(glGetUniformLocation(p,"tex0"),0);glUniform1i(glGetUniformLocation(p,"tex1"),1);glUniform4f(glGetUniformLocation(p,"u_ssrTex"),1,1,-1,0);
 +  glUniformMatrix4fv(glGetUniformLocation(p,"u_vpCur"),1,GL_FALSE,identity);glUniformMatrix4fv(glGetUniformLocation(p,"u_vpPrev"),1,GL_FALSE,identity);glUniformMatrix4fv(glGetUniformLocation(p,"u_prevWorld"),1,GL_FALSE,identity);glUniform1f(glGetUniformLocation(p,"u_velOn"),1);glUniform1f(glGetUniformLocation(p,"u_reflectionOwner"),17);
-+  glDrawArrays(GL_TRIANGLES,0,3);float marker[4];glReadBuffer(GL_COLOR_ATTACHMENT1);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,marker);maxError=fmaxf(maxError,fabsf(marker[2]+17));float direction[4],base[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,direction);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,base);
++  glDrawArrays(GL_TRIANGLES,0,3);float marker[4];glReadBuffer(GL_COLOR_ATTACHMENT1);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,marker);maxError=fmaxf(maxError,fabsf(marker[2]+17));maxError=fmaxf(maxError,fabsf(marker[3]+.5f));float direction[4],base[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,direction);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,base);
 +  float x=-.03125f,y=-.03125f,z=10,n=sqrtf(x*x+y*y+z*z);float nx=1/world[0],nz=1/world[10],nn=sqrtf(nx*nx+nz*nz);nx/=nn;nz/=nn;float vn=(x*nx+z*nz)/n;float expected[]={(-x/n+2*vn*nx)*.5f+.5f,(-y/n)*.5f+.5f,(-z/n+2*vn*nz)*.5f+.5f};
 +  for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(direction[c]-expected[c]));
 +  for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(base[c]-.2f));
@@ -17614,7 +17887,7 @@ index 00000000..46feba02
 +  glUseProgram(prep);texture(tex[3],0,GL_TEXTURE_2D,white,1,1);glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,tex[2]);glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,tex[1]);
 +  glUniform1i(glGetUniformLocation(prep,"depthTex"),0);glUniform1i(glGetUniformLocation(prep,"reflTex"),1);glUniform1i(glGetUniformLocation(prep,"velTex"),2);glUniform1i(glGetUniformLocation(prep,"div"),1);glDrawArrays(GL_TRIANGLES,0,3);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,marker);maxError=fmaxf(maxError,fabsf(marker[3]-17));glBindFramebuffer(GL_FRAMEBUFFER,fbo);glDeleteFramebuffers(1,&prepFbo);glReadBuffer(GL_COLOR_ATTACHMENT0);
 +  // A single ray-traced coat carries the material reflection at the default RT strength.
-+  std::vector<float> green(32*32*4,0),vel(green.size(),0);for(int i=0;i<32*32;i++){green[i*4]=float(i%32)/31;green[i*4+1]=float(i/32)/31;green[i*4+2]=.25f;green[i*4+3]=1;vel[i*4+3]=1;}
++  std::vector<float> green(32*32*4,0),vel(green.size(),0);for(int i=0;i<32*32;i++){green[i*4]=float(i%32)/31;green[i*4+1]=float(i/32)/31;green[i*4+2]=.25f;green[i*4+3]=1;vel[i*4+3]=-.5f;}
 +  texture(tex[5],0,GL_TEXTURE_RECTANGLE,green.data());glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,tex[2]);texture(tex[6],2,GL_TEXTURE_2D,vel.data());glDrawBuffers(1,bufs);glUseProgram(composite);glUniform1i(glGetUniformLocation(composite,"rtTex"),0);glUniform1i(glGetUniformLocation(composite,"reflTex"),1);glUniform1i(glGetUniformLocation(composite,"velTex"),2);glUniform1f(glGetUniformLocation(composite,"strength"),.5f);glUniform1i(glGetUniformLocation(composite,"div"),1);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);float result[4];glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,result);float a=direction[3];
 +  for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(result[c]-(base[c]*(1-a)+green[(16*32+16)*4+c]*a)));
 +  // Diffuse occlusion must not dim the clear-coat image.
@@ -18022,6 +18295,70 @@ index 00000000..b6e75f90
 +obj=f'/tmp/{target}-msaa-levels-test.o';exe=f'/tmp/{target}-msaa-levels-test'
 +subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-I'+str(root/'vendor/librw/src/mtl'),'-std=c++17','-fobjc-arc','-c',str(root/'tools-mtl/msaa-levels-test.mm'),'-o',obj],check=True)
 +cmd=shlex.split((base/'link.txt').read_text());cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_msaaLevelsTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd=root,env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
+diff --git a/tools/run_ped_reflections_test.py b/tools/run_ped_reflections_test.py
+new file mode 100644
+index 00000000..2eb6b405
+--- /dev/null
++++ b/tools/run_ped_reflections_test.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-ped-native-test.o';exe=f'/tmp/{target}-ped-native-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-std=c++17','-fobjc-arc','-c',str(root/'tools-mtl/rt-ped-native-test.mm'),'-o',obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd=[arg for arg in cmd if not arg.endswith('/extras/metalfx/MetalRT.cpp.o')];cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_pedReflectionsTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd='/tmp',env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
+diff --git a/tools/run_reflection_composite_test.py b/tools/run_reflection_composite_test.py
+new file mode 100644
+index 00000000..8fd763a7
+--- /dev/null
++++ b/tools/run_reflection_composite_test.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-reflection-composite-test.o';exe=f'/tmp/{target}-reflection-composite-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-I'+str(root/'vendor/librw/src/mtl'),'-std=c++17','-c',str(root/'tools-mtl/reflection-composite-test.cpp'),'-o',obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_reflectionCompositeTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd=root,env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
+diff --git a/tools/run_reflection_receiver_test.py b/tools/run_reflection_receiver_test.py
+new file mode 100644
+index 00000000..0d54e7f5
+--- /dev/null
++++ b/tools/run_reflection_receiver_test.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-reflection-receiver-test.o';exe=f'/tmp/{target}-reflection-receiver-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-std=c++17','-fobjc-arc','-c',str(root/'tools-mtl/rt-reflection-receiver-test.mm'),'-o',obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd=[arg for arg in cmd if not arg.endswith('/extras/metalfx/MetalRT.cpp.o')];cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_reflectionReceiverTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd='/tmp',env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
+diff --git a/tools/run_scene_refit_test.py b/tools/run_scene_refit_test.py
+new file mode 100644
+index 00000000..b115fde5
+--- /dev/null
++++ b/tools/run_scene_refit_test.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-scene-refit-test.o';exe=f'/tmp/{target}-scene-refit-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-std=c++17','-fobjc-arc','-c',str(root/'tools-mtl/rt-scene-refit-test.mm'),'-o',obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd=[arg for arg in cmd if not arg.endswith('/extras/metalfx/MetalRT.cpp.o')];cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_sceneRefitTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd='/tmp',env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
 diff --git a/tools/run_sun_composite_test.py b/tools/run_sun_composite_test.py
 new file mode 100644
 index 00000000..3ff1a13d
@@ -18476,10 +18813,10 @@ index 00000000..9b9d79b5
 +}
 diff --git a/tools/test_imported_suspension.cpp b/tools/test_imported_suspension.cpp
 new file mode 100644
-index 00000000..422d4e7a
+index 00000000..b358098a
 --- /dev/null
 +++ b/tools/test_imported_suspension.cpp
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,235 @@
 +// Standalone production asset/streaming/hierarchy/arm test. No game loop.
 +#define GLFW_INCLUDE_NONE
 +#include "common.h"
@@ -18620,6 +18957,18 @@ index 00000000..422d4e7a
 + mi.SetVehicleColour(1,2);
 + for(auto &pair:fixedMaterials)assert(!memcmp(&pair.second,&pair.first->color,sizeof(RwRGBA)));
 + puts("PASS native exterior repaint preserves all fixed interior/glass/trim material colours.");
++
++ int lensCount=0;
++ FORLIST(link,clump->atomics){
++  auto *atomic=rw::Atomic::fromClump(link);const char *part=GetFrameNodeName(RpAtomicGetFrame(atomic));if(strncmp(part,"iv_lamp_",8))continue;
++  ImportedLampLens lens;lens.atomic=atomic;lens.flags=RpAtomicGetFlags(atomic);assert(lens.flags & rpATOMICRENDER);
++  assert(SetImportedLampBroken(lens,true));assert(!RpAtomicGetFlags(atomic));assert(!SetImportedLampBroken(lens,true));
++  assert(!SetImportedLampBroken(lens,false));assert(RpAtomicGetFlags(atomic)==lens.flags);assert(!SetImportedLampBroken(lens,false));lensCount++;
++ }
++ auto *lampClone=RpClumpClone(clump);assert(lampClone);
++ FORLIST(link,lampClone->atomics){auto *a=rw::Atomic::fromClump(link);if(!strncmp(GetFrameNodeName(RpAtomicGetFrame(a)),"iv_lamp_",8))RpAtomicSetFlags(a,0);}
++ FORLIST(link,clump->atomics){auto *a=rw::Atomic::fromClump(link);if(!strncmp(GetFrameNodeName(RpAtomicGetFrame(a)),"iv_lamp_",8))assert(RpAtomicGetFlags(a)&rpATOMICRENDER);}
++ lampClone->destroy();printf("PASS %d authored lamp-lens atomics survive preprocessing; break/repair visibility, one shatter transition, and instance isolation.\n",lensCount);
 +
 + const char *arms[]={"iv_suspension_lf","iv_suspension_lr","iv_suspension_rf","iv_suspension_rr"};
 + const int ids[]={CAR_WHEEL_LF,CAR_WHEEL_LB,CAR_WHEEL_RF,CAR_WHEEL_RB};

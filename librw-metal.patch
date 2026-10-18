@@ -171,7 +171,7 @@ index 671948f..0ee725e 100644
  	D3dRaster *ras;
  	if(compression){
 diff --git a/src/gl/gl3device.cpp b/src/gl/gl3device.cpp
-index 5275fe5..475dc75 100644
+index 5275fe5..a92e618 100644
 --- a/src/gl/gl3device.cpp
 +++ b/src/gl/gl3device.cpp
 @@ -1,7 +1,13 @@
@@ -238,7 +238,7 @@ index 5275fe5..475dc75 100644
  int32 u_surfProps;
  
  Shader *defaultShader, *defaultShader_noAT;
-@@ -244,8 +272,147 @@ static GlState curGlState, oldGlState;
+@@ -244,8 +272,151 @@ static GlState curGlState, oldGlState;
  static int32 activeTexture;
  static uint32 boundTexture[MAXNUMSTAGES];
  
@@ -296,6 +296,10 @@ index 5275fe5..475dc75 100644
 +extern "C" { int8_t regtaGfxRTResolutionIdx=0, regtaGfxMSAAIdx=1, regtaGfxScaleIdx, regtaGfxTemporal, regtaGfxMetalFX, regtaGfxSSR, regtaGfxRT, regtaGfxRTRoads, regtaGfxRTShadows, regtaGfxPuddles = 1, regtaGfxRTAO = 1, regtaGfxRTGI = 1, regtaGfxRTLights = 1, regtaGfxRTGlass = 1, regtaGfxSunShafts = 1; }
 +static const float kScaleTable[6] = { 1.0f, 0.9f, 0.8f, 0.75f, 0.67f, 0.5f };
 +// frame cost of the extra graphics passes (milliseconds, smoothed): ray tracing, MetalFX, whole upscale/resolve step
++#ifdef RW_METALGL
++extern "C" float mrtGpuMilliseconds(void);
++extern "C" float mfxGpuMilliseconds(void);
++#endif
 +static float gPerfMs[6];	// ray tracing, MetalFX, upscale step, scene feed, scene CPU, scene GPU
 +static GLuint gSceneQuery[2];
 +static int gSceneQi;
@@ -386,7 +390,7 @@ index 5275fe5..475dc75 100644
  static uint32 blendMap[] = {
  	GL_ZERO,	// actually invalid
  	GL_ZERO,
-@@ -320,6 +487,10 @@ flushGlRenderState(void)
+@@ -320,6 +491,10 @@ flushGlRenderState(void)
  	if(oldGlState.blendEnable != curGlState.blendEnable){
  		oldGlState.blendEnable = curGlState.blendEnable;
  		(oldGlState.blendEnable ? glEnable : glDisable)(GL_BLEND);
@@ -397,7 +401,7 @@ index 5275fe5..475dc75 100644
  	}
  
  	if(oldGlState.srcblend != curGlState.srcblend ||
-@@ -495,6 +666,7 @@ bindFramebuffer(uint32 fbo)
+@@ -495,6 +670,7 @@ bindFramebuffer(uint32 fbo)
  	if(currentFramebuffer != fbo){
  		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
  		currentFramebuffer = fbo;
@@ -405,7 +409,7 @@ index 5275fe5..475dc75 100644
  	}
  }
  
-@@ -672,6 +844,35 @@ evictRaster(Raster *raster)
+@@ -672,6 +848,35 @@ evictRaster(Raster *raster)
  	}
  }
  
@@ -441,7 +445,7 @@ index 5275fe5..475dc75 100644
  void
  setTexture(int32 stage, Texture *tex)
  {
-@@ -988,6 +1189,82 @@ setWorldMatrix(Matrix *mat)
+@@ -988,6 +1193,82 @@ setWorldMatrix(Matrix *mat)
  	convMatrix(&uniformObject.world, mat);
  	setUniform(u_world, &uniformObject.world);
  	objectDirty = 1;
@@ -524,7 +528,7 @@ index 5275fe5..475dc75 100644
  }
  
  int32
-@@ -1193,6 +1470,89 @@ flushCache(void)
+@@ -1193,6 +1474,90 @@ flushCache(void)
  	flushUniforms();
  }
  
@@ -567,7 +571,8 @@ index 5275fe5..475dc75 100644
 +	if(gNeedVel){
 +		if(rsVelTex == 0) glGenTextures(1, &rsVelTex);
 +		glBindTexture(GL_TEXTURE_2D, rsVelTex);
-+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_HALF_FLOAT, nil);
++		// Float32 retains window receiver depth near the far plane and exact vehicle ownership.
++		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nil);
 +		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 +		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 +		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -614,7 +619,7 @@ index 5275fe5..475dc75 100644
  static void
  setFrameBuffer(Camera *cam)
  {
-@@ -1204,6 +1564,15 @@ setFrameBuffer(Camera *cam)
+@@ -1204,6 +1569,15 @@ setFrameBuffer(Camera *cam)
  	Gl3Raster *natzb = PLUGINOFFSET(Gl3Raster, zbuf, nativeRasterOffset);
  	assert(fbuf->type == Raster::CAMERA || fbuf->type == Raster::CAMERATEXTURE);
  
@@ -630,7 +635,7 @@ index 5275fe5..475dc75 100644
  	// Have to make sure depth buffer is attached to FB's fbo
  	bindFramebuffer(natfb->fbo);
  	if(zbuf){
-@@ -1236,6 +1605,42 @@ setFrameBuffer(Camera *cam)
+@@ -1236,6 +1610,42 @@ setFrameBuffer(Camera *cam)
  			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
  		natfb->fboMate = nil;
  	}
@@ -673,7 +678,7 @@ index 5275fe5..475dc75 100644
  }
  
  static Rect
-@@ -1250,23 +1655,47 @@ getFramebufferRect(Raster *frameBuffer)
+@@ -1250,23 +1660,47 @@ getFramebufferRect(Raster *frameBuffer)
  		SDL_GetWindowSize(glGlobals.window, &r.w, &r.h);
  #elif defined(LIBRW_GLFW)
  		glfwGetFramebufferSize(glGlobals.window, &r.w, &r.h);
@@ -727,7 +732,7 @@ index 5275fe5..475dc75 100644
  	}
  
  	return r;
-@@ -1286,10 +1715,1565 @@ setViewport(Raster *frameBuffer)
+@@ -1286,10 +1720,1577 @@ setViewport(Raster *frameBuffer)
  	}
  }
  
@@ -919,7 +924,7 @@ index 5275fe5..475dc75 100644
 +"	vec4 vel = texelFetch(velTex, clamp(dTex, ivec2(0), ivec2(lowSize)-1), 0);\n"
 +"	vec2 puv;\n"
 +"	bool ok;\n"
-+"	if(vel.a > 0.5){\n"
++"	if((vel.a > 0.5 || vel.a < 0.0)){\n"
 +"		// moving object: its own motion vector\n"
 +"		puv = outUV - vel.xy;\n"
 +"		ok = histValid > 0.5;\n"
@@ -995,7 +1000,7 @@ index 5275fe5..475dc75 100644
 +"void main(){\n"
 +" ivec2 p=ivec2(gl_FragCoord.xy);\n"
 +" vec4 velocity=texelFetch(velTex,p,0);\n"
-+" float actor=velocity.a>0.5 ? velocity.b:0.0;\n"
++" float actor=(velocity.a>0.5 || velocity.a<0.0) ? velocity.b:0.0;\n"
 +" float shadow=texture(dynShadow,gl_FragCoord.xy/lowSize).g;\n"
 +" float luma=dot(texelFetch(colorTex,p,0).rgb,vec3(0.299,0.587,0.114));\n"
 +" fragColor=vec4(shadow,texelFetch(depthTex,p,0).r,actor,luma);\n"
@@ -1046,7 +1051,7 @@ index 5275fe5..475dc75 100644
 +"	vec2 uv = gl_FragCoord.xy/lowSize;\n"
 +"	vec4 vel = texelFetch(velTex, p, 0);\n"
 +"	vec2 v;\n"
-+"	if(vel.a > 0.5){\n"
++"	if((vel.a > 0.5 || vel.a < 0.0)){\n"
 +"		v = vel.xy;\n"
 +"	}else{\n"
 +"		vec4 wp = invVP*vec4(uv*2.0-1.0, d*2.0-1.0, 1.0);\n"
@@ -1072,7 +1077,7 @@ index 5275fe5..475dc75 100644
 +"          float weight=(x==0?1.0-f.x:f.x)*(y==0?1.0-f.y:f.y);\n"
 +"          if(weight<0.12)continue;\n"
 +"          vec4 old=texelFetch(prevDynamicMask,clamp(base+ivec2(x,y),ivec2(0),ivec2(lowSize)-1),0);\n"
-+"          if(abs(old.b-now.b)>0.25 || (vel.a<0.5 && abs(old.g-expected)>tolerance))reactive=1.0;\n"
++"          if(abs(old.b-now.b)>0.25 || (vel.a>=0.0 && vel.a<0.5 && abs(old.g-expected)>tolerance))reactive=1.0;\n"
 +"          reactive=max(reactive,smoothstep(0.05,0.25,abs(old.r-now.r)));\n"
 +"          if(now.b<0.0)reactive=max(reactive,smoothstep(0.12,0.4,abs(old.a-now.a))*0.45);\n"
 +"        }\n"
@@ -1593,10 +1598,14 @@ index 5275fe5..475dc75 100644
 +"	ivec2 p = ivec2(gl_FragCoord.xy);\n"
 +"	float w = texelFetch(reflTex, p, 0).a;\n"
 +"	float velA = texelFetch(velTex, p, 0).a;\n"
-+"	if(velA > 1.5 || velA < 0.5) discard;	// only cars: characters never get one, the ground takes its own reflection in its shader\n"
++"	if(velA > 1.5) discard;	// Characters never receive a reflection coat.\n"
 +"	if(w <= 0.001) discard;\n"
 +"	// Full resolution samples texel centres; reduced quality uses bilinear reconstruction.\n"
-+"	vec4 r = texture(rtTex, (vec2(p) + 0.5)/float(div));\n""	fragColor = dbg > 0.5 ? vec4(1.0, 0.0, 0.0, clamp(w*2.0, 0.0, 1.0)) : vec4(r.rgb, clamp(w*strength*2.0, 0.0, 0.9));\n"
++"	vec4 r = texture(rtTex, (vec2(p) + 0.5)/float(div));\n"
++"	bool car = velA < 0.0 || velA > 0.5;\n"
++"	bool ground = texelFetch(velTex, p, 0).b > 0.5;\n"
++"	float coverage = car ? clamp(w*strength*2.0, 0.0, 0.9) : clamp(w*(ground ? strength : 1.0), 0.0, 1.0);\n"
++"	fragColor = dbg > 0.5 ? vec4(1.0, 0.0, 0.0, clamp(w*2.0, 0.0, 1.0)) : vec4(r.rgb, coverage*r.a);\n"
 +"}\n";
 +
 +static const char *rsRTShadowSrc =
@@ -2074,7 +2083,11 @@ index 5275fe5..475dc75 100644
 +	{
 +		double t0 = perfNow();
 +		rsRayTracePass();
-+		gPerfMs[0] += ((float)(perfNow() - t0) - gPerfMs[0])*0.05f;
++		#ifdef RW_METALGL
++        gPerfMs[0] += (mrtGpuMilliseconds()-gPerfMs[0])*0.05f;
++#else
++        gPerfMs[0] += ((float)(perfNow() - t0) - gPerfMs[0])*0.05f;
++#endif
 +	}
 +
 +	GLuint sharpenSrc = rsUpTex;
@@ -2082,7 +2095,11 @@ index 5275fe5..475dc75 100644
 +	bool temporal = gTemporal && gJitterApplied && rsTemporalProg && rsHistTex[0] && rsVelTex && rsCamera->zBuffer;
 +	double mfxT0 = perfNow();
 +	bool mfxDone = temporal && gMetalFX && rsMetalFXPass();
-+	gPerfMs[1] += ((mfxDone ? (float)(perfNow() - mfxT0) : 0.0f) - gPerfMs[1])*0.05f;
++	#ifdef RW_METALGL
++    gPerfMs[1] += ((mfxDone?mfxGpuMilliseconds():0.0f)-gPerfMs[1])*0.05f;
++#else
++    gPerfMs[1] += ((mfxDone ? (float)(perfNow() - mfxT0) : 0.0f) - gPerfMs[1])*0.05f;
++#endif
 +	if(mfxDone){
 +		gHistValid = true;
 +		sharpenSrc = rsHistTex[rsHistCur];
@@ -2293,7 +2310,7 @@ index 5275fe5..475dc75 100644
  	// View Matrix
  	Matrix inv;
  	Matrix::invert(&inv, cam->getFrame()->getLTM());
-@@ -1347,6 +3331,36 @@ beginUpdate(Camera *cam)
+@@ -1347,6 +3348,36 @@ beginUpdate(Camera *cam)
  		proj[15] = 1.0f;
  	}
  	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
@@ -2330,7 +2347,7 @@ index 5275fe5..475dc75 100644
  	setProjectionMatrix(proj);
  
  	if(rwStateCache.fogStart != cam->fogPlane){
-@@ -1397,6 +3411,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1397,6 +3428,20 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  	if(mode & Camera::CLEARSTENCIL)
  		mask |= GL_STENCIL_BUFFER_BIT;
  	glDepthMask(GL_TRUE);
@@ -2351,7 +2368,7 @@ index 5275fe5..475dc75 100644
  	glClear(mask);
  	glDepthMask(rwStateCache.zwrite);
  
-@@ -1404,9 +3432,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
+@@ -1404,9 +3449,12 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
  		glDisable(GL_SCISSOR_TEST);
  }
  
@@ -2364,7 +2381,7 @@ index 5275fe5..475dc75 100644
  //	glViewport(raster->offsetX, raster->offsetY,
  //		raster->width, raster->height);
  
-@@ -1423,11 +3454,94 @@ showRaster(Raster *raster, uint32 flags)
+@@ -1423,11 +3471,94 @@ showRaster(Raster *raster, uint32 flags)
  		SDL_GL_SetSwapInterval(0);
  	SDL_GL_SwapWindow(glGlobals.window);
  #elif defined(LIBRW_GLFW)
@@ -2463,7 +2480,7 @@ index 5275fe5..475dc75 100644
  #else
  	not implemented
  #endif
-@@ -1449,8 +3563,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
+@@ -1449,8 +3580,11 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
  		case Raster::CAMERA:
  			setActiveTexture(0);
  			glBindTexture(GL_TEXTURE_2D, natdst->texid);
@@ -2477,7 +2494,7 @@ index 5275fe5..475dc75 100644
  			glBindTexture(GL_TEXTURE_2D, boundTexture[0]);
  			return 1;
  		}
-@@ -1885,6 +4002,8 @@ static struct {
+@@ -1885,6 +4019,8 @@ static struct {
  	{ 0, 0, 0 },
  };
  
@@ -2486,7 +2503,7 @@ index 5275fe5..475dc75 100644
  static int
  startGLFW(void)
  {
-@@ -1894,6 +4013,124 @@ startGLFW(void)
+@@ -1894,6 +4030,124 @@ startGLFW(void)
  	mode = &glGlobals.modes[glGlobals.currentMode];
  
  	glfwSetErrorCallback(glfwerr);
@@ -2611,7 +2628,7 @@ index 5275fe5..475dc75 100644
  	glfwWindowHint(GLFW_RED_BITS, mode->mode.redBits);
  	glfwWindowHint(GLFW_GREEN_BITS, mode->mode.greenBits);
  	glfwWindowHint(GLFW_BLUE_BITS, mode->mode.blueBits);
-@@ -1905,10 +4142,31 @@ startGLFW(void)
+@@ -1905,10 +4159,31 @@ startGLFW(void)
  		glfwWindowHint(GLFW_SAMPLES, glGlobals.numSamples);
  
  	int i;
@@ -2643,7 +2660,7 @@ index 5275fe5..475dc75 100644
  
  		if(mode->flags & VIDEOMODEEXCLUSIVE)
  			win = glfwCreateWindow(mode->mode.width, mode->mode.height, glGlobals.winTitle, glGlobals.monitor, nil);
-@@ -1924,6 +4182,22 @@ startGLFW(void)
+@@ -1924,6 +4199,22 @@ startGLFW(void)
  		RWERROR((ERR_GENERAL, "glfwCreateWindow() failed"));
  		return 0;
  	}
@@ -2666,7 +2683,7 @@ index 5275fe5..475dc75 100644
  	glfwMakeContextCurrent(win);
  
  	/* Init GLAD */
-@@ -1932,8 +4206,14 @@ startGLFW(void)
+@@ -1932,8 +4223,14 @@ startGLFW(void)
  		glfwDestroyWindow(win);
  		return 0;
  	}
@@ -2682,7 +2699,7 @@ index 5275fe5..475dc75 100644
  
  	glGlobals.window = win;
  	*glGlobals.pWindow = win;
-@@ -1975,6 +4255,7 @@ initOpenGL(void)
+@@ -1975,6 +4272,7 @@ initOpenGL(void)
  */
  	gl3Caps.dxtSupported = !!GLAD_GL_EXT_texture_compression_s3tc;
  	gl3Caps.astcSupported = !!GLAD_GL_KHR_texture_compression_astc_ldr;
@@ -2690,7 +2707,7 @@ index 5275fe5..475dc75 100644
  
  	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &gl3Caps.maxAnisotropy);
  
-@@ -2009,6 +4290,7 @@ initOpenGL(void)
+@@ -2009,6 +4307,7 @@ initOpenGL(void)
  	registerBlock("State");
  #endif
  	u_matColor = registerUniform("u_matColor", UNIFORM_VEC4);
@@ -2698,7 +2715,7 @@ index 5275fe5..475dc75 100644
  	u_surfProps = registerUniform("u_surfProps", UNIFORM_VEC4);
  
  	// for im2d
-@@ -2060,10 +4342,10 @@ initOpenGL(void)
+@@ -2060,10 +4359,10 @@ initOpenGL(void)
  
  #include "shaders/default_vs_gl.inc"
  #include "shaders/simple_fs_gl.inc"
@@ -3042,10 +3059,10 @@ index 6e3d6c4..aea54cc 100644
  
  "	v_tex0 = in_tex0;\n"
 diff --git a/src/gl/shaders/header.frag b/src/gl/shaders/header.frag
-index ba50165..170945b 100644
+index ba50165..950d94e 100644
 --- a/src/gl/shaders/header.frag
 +++ b/src/gl/shaders/header.frag
-@@ -28,3 +28,145 @@ void DoAlphaTest(float a)
+@@ -28,3 +28,132 @@ void DoAlphaTest(float a)
  		discard;
  #endif
  }
@@ -3137,13 +3154,8 @@ index ba50165..170945b 100644
 +		float fres = 0.04 + 0.96*pow(1.0 - cosT, 5.0);
 +		glassDir = reflect(viewDir, gn);
 +		glassWeight = u_glassRefl.x*mix(0.3, 1.0, fres)*(1.0 - smoothstep(0.75, 0.95, abs(gn.z)));
-+		if(glassWeight > 0.01 && u_rtParams.x > 0.5 && v_posPrev.w > 0.0){
-+			vec2 gu = (v_posPrev.xy/v_posPrev.w)*0.5 + 0.5 + u_rtPrevJitter;
-+			if(gu.x > 0.0 && gu.x < 1.0 && gu.y > 0.0 && gu.y < 1.0){
-+				vec4 r = texture(u_rtPrev, gu);
-+				color.rgb = mix(color.rgb, r.rgb/max(r.a, 0.001), clamp(glassWeight, 0.0, 1.0)*smoothstep(0.0, 0.6, r.a));
-+			}
-+		}
++		// The current-frame trace is composited after opaque and transparent geometry.
++
 +	}
 +	if(wetAmount > 0.001 && coverOn && v_posPrev.w > 0.0){
 +		// ground under a roof (traced last frame, the map does not move) stays dry
@@ -3156,16 +3168,8 @@ index ba50165..170945b 100644
 +		float puddle = smoothstep(0.56, 0.72, n)*smoothstep(0.25, 0.6, clamp(wetAmount*1.4, 0.0, 1.0))*u_roadPuddles;
 +		wetWeight = wetAmount*mix(0.12, 0.9, v_rfres)*0.5 + puddle*0.95;
 +		color.rgb *= 1.0 - 0.15*puddle;
-+		// the reflection belongs to the ground itself: look it up where this point was last frame (the ground is static, so
-+		// that is exact) and mix it into the ground colour. Characters and cars drawn later simply cover it.
-+		if(u_rtParams.x > 0.5 && v_posPrev.w > 0.0){
-+			vec2 pu = (v_posPrev.xy/v_posPrev.w)*0.5 + 0.5 + u_rtPrevJitter;
-+			if(pu.x > 0.0 && pu.x < 1.0 && pu.y > 0.0 && pu.y < 1.0){
-+				vec4 r = texture(u_rtPrev, pu);
-+				// the filtered image holds colour*coverage in rgb and coverage in a: undo that so edges fade instead of flicker
-+				color.rgb = mix(color.rgb, r.rgb/max(r.a, 0.001), clamp(wetWeight*u_rtParams.y, 0.0, 1.0)*smoothstep(0.0, 0.6, r.a));
-+			}
-+		}
++		// Current-frame compositing prevents old vehicle silhouettes entering wet-road colour.
++
 +	}
 +}
 +// The neo road gloss used to be a second additive pass over every road. Doing it in the same draw halves the road draw calls.
@@ -3179,7 +3183,7 @@ index ba50165..170945b 100644
 +}
 +#define WET_FS(color) DoWet(color)
 +#define GLOSS_FS(color) DoGloss(color, v_tex0, v_fog)
-+#define WRITE_REFL() (reflOut = glassWeight > wetWeight ? vec4(normalize(glassDir)*0.5 + 0.5, clamp(glassWeight, 0.0, 1.0)) : vec4(normalize(v_rrefl)*0.5 + 0.5, clamp(wetWeight, 0.0, 1.0)))	// 8 bit: direction*0.5+0.5, weight
++#define WRITE_REFL() (reflOut = glassWeight > wetWeight ? vec4(normalize(glassDir)*0.5 + 0.5, clamp(glassWeight, 0.0, 1.0)) : vec4(normalize(v_rrefl)*0.5 + 0.5, clamp(wetWeight, 0.0, 1.0)))	// half-float direction*0.5+0.5, weight
 +#elif defined(ZERO_REFL)
 +// shaders of things that are not wet ground (characters, other materials) clear the reflection weight under them
 +layout(location = 2) out vec4 reflOut;
@@ -3237,10 +3241,10 @@ index bb9881f..972f289 100644
 +#define WET_VS(wpos)
 +#endif
 diff --git a/src/gl/shaders/header_fs.inc b/src/gl/shaders/header_fs.inc
-index 802bb4f..d682536 100644
+index 802bb4f..8b06ed6 100644
 --- a/src/gl/shaders/header_fs.inc
 +++ b/src/gl/shaders/header_fs.inc
-@@ -29,4 +29,146 @@ const char *header_frag_src =
+@@ -29,4 +29,133 @@ const char *header_frag_src =
  "		discard;\n"
  "#endif\n"
  "}\n"
@@ -3332,13 +3336,8 @@ index 802bb4f..d682536 100644
 +"		float fres = 0.04 + 0.96*pow(1.0 - cosT, 5.0);\n"
 +"		glassDir = reflect(viewDir, gn);\n"
 +"		glassWeight = u_glassRefl.x*mix(0.3, 1.0, fres)*(1.0 - smoothstep(0.75, 0.95, abs(gn.z)));\n"
-+"		if(glassWeight > 0.01 && u_rtParams.x > 0.5 && v_posPrev.w > 0.0){\n"
-+"			vec2 gu = (v_posPrev.xy/v_posPrev.w)*0.5 + 0.5 + u_rtPrevJitter;\n"
-+"			if(gu.x > 0.0 && gu.x < 1.0 && gu.y > 0.0 && gu.y < 1.0){\n"
-+"				vec4 r = texture(u_rtPrev, gu);\n"
-+"				color.rgb = mix(color.rgb, r.rgb/max(r.a, 0.001), clamp(glassWeight, 0.0, 1.0)*smoothstep(0.0, 0.6, r.a));\n"
-+"			}\n"
-+"		}\n"
++"		// The current-frame trace is composited after opaque and transparent geometry.\n"
++
 +"	}\n"
 +"	if(wetAmount > 0.001 && coverOn && v_posPrev.w > 0.0){\n"
 +"		// ground under a roof (traced last frame, the map does not move) stays dry\n"
@@ -3351,16 +3350,8 @@ index 802bb4f..d682536 100644
 +"		float puddle = smoothstep(0.56, 0.72, n)*smoothstep(0.25, 0.6, clamp(wetAmount*1.4, 0.0, 1.0))*u_roadPuddles;\n"
 +"		wetWeight = wetAmount*mix(0.12, 0.9, v_rfres)*0.5 + puddle*0.95;\n"
 +"		color.rgb *= 1.0 - 0.15*puddle;\n"
-+"		// the reflection belongs to the ground itself: look it up where this point was last frame (the ground is static, so\n"
-+"		// that is exact) and mix it into the ground colour. Characters and cars drawn later simply cover it.\n"
-+"		if(u_rtParams.x > 0.5 && v_posPrev.w > 0.0){\n"
-+"			vec2 pu = (v_posPrev.xy/v_posPrev.w)*0.5 + 0.5 + u_rtPrevJitter;\n"
-+"			if(pu.x > 0.0 && pu.x < 1.0 && pu.y > 0.0 && pu.y < 1.0){\n"
-+"				vec4 r = texture(u_rtPrev, pu);\n"
-+"				// the filtered image holds colour*coverage in rgb and coverage in a: undo that so edges fade instead of flicker\n"
-+"				color.rgb = mix(color.rgb, r.rgb/max(r.a, 0.001), clamp(wetWeight*u_rtParams.y, 0.0, 1.0)*smoothstep(0.0, 0.6, r.a));\n"
-+"			}\n"
-+"		}\n"
++"		// Current-frame compositing prevents old vehicle silhouettes entering wet-road colour.\n"
++
 +"	}\n"
 +"}\n"
 +"// The neo road gloss used to be a second additive pass over every road. Doing it in the same draw halves the road draw calls.\n"
@@ -3374,7 +3365,7 @@ index 802bb4f..d682536 100644
 +"}\n"
 +"#define WET_FS(color) DoWet(color)\n"
 +"#define GLOSS_FS(color) DoGloss(color, v_tex0, v_fog)\n"
-+"#define WRITE_REFL() (reflOut = glassWeight > wetWeight ? vec4(normalize(glassDir)*0.5 + 0.5, clamp(glassWeight, 0.0, 1.0)) : vec4(normalize(v_rrefl)*0.5 + 0.5, clamp(wetWeight, 0.0, 1.0)))	// 8 bit: direction*0.5+0.5, weight\n"
++"#define WRITE_REFL() (reflOut = glassWeight > wetWeight ? vec4(normalize(glassDir)*0.5 + 0.5, clamp(glassWeight, 0.0, 1.0)) : vec4(normalize(v_rrefl)*0.5 + 0.5, clamp(wetWeight, 0.0, 1.0)))	// half-float direction*0.5+0.5, weight\n"
 +"#elif defined(ZERO_REFL)\n"
 +"// shaders of things that are not wet ground (characters, other materials) clear the reflection weight under them\n"
 +"layout(location = 2) out vec4 reflOut;\n"
