@@ -312,6 +312,29 @@ index 00000000..a9a214c4
 +- `tools-mtl/rt-shadow-history-test.mm`: 16 jitter phases, surface rejection and 4 cm dynamic contact occluder pass.
 +- `tools-mtl/rt-ped-reflections-test.mm`: textured ray hits, own-car exclusion, other cars/peds, geometry replacement and retained resource cache invalidation pass with Metal API Validation.
 +- Native Metal executable builds. Real gameplay performance and visual approval remain unverified.
+diff --git a/docs/PERFORMANCE_PARITY.md b/docs/PERFORMANCE_PARITY.md
+new file mode 100644
+index 00000000..5b07b41f
+--- /dev/null
++++ b/docs/PERFORMANCE_PARITY.md
+@@ -0,0 +1,17 @@
++# Performance fix parity audit
++
++2026-10-18. Audited GTA III and Vice City, Metal and OpenGL sources/builds.
++
++| Fix requested from the earlier profile | Both games |
++|---|---|
++| Environment-map overhead | Already skips the legacy map while textured ray reflections are active; legacy fallback refreshes on alternate frames. Reflection resolution, trace geometry and ray counts are preserved. |
++| Expensive mouse hover check | Removed the remaining every-15-frame `GLFW_HOVERED` query. State is initialized after callback registration, updated by enter/leave callbacks and refreshed on focus regain. Input motion/button sampling remains active. |
++| Per-string text logging | Already disabled unless `REGTA_DEBUG_TEXT=1` is explicitly set. No runtime text debug logs were present to clean up. |
++| Forced Retina framebuffer | Already follows each game's own INI (`re3.ini` / `reVC.ini`). Metal uses requested pixels rather than automatically multiplying by display backing scale; Retina=1 remains available. |
++| Duplicate sun shadows | Existing dark car/heli/pole blobs are skipped when traced sun shadows are visible. Pedestrian blob shadows, blood, marks and light pools remain. |
++| Stale trainer text on radar | Existing depth/stencil clear before HUD composition is retained. |
++| GPU diagnostics | Existing opt-in pass timing and actual RT/MetalFX GPU timing are retained. |
++
++Validation: both Metal and both OpenGL executables build successfully. A hidden native test exercises production cursor/focus callbacks and confirms actual Metal drawable requests of 48x48, 96x96 and 32x24 are respected. No game was launched. This verifies source/build/native fixture behavior, not a measured gameplay FPS gain or complete shadow/HUD appearance.
++
++Runtime settings at audit: both use Retina=0 and RenderScaleIdx=0 (100%). GTA III uses RenderMSAAIdx=1; Vice City uses RenderMSAAIdx=2. Installation preserves INI bytes, reflection settings, geometry and texture detail. No resolution/detail reduction is part of this update.
 diff --git a/docs/RAY_REFLECTION_MATERIALS.md b/docs/RAY_REFLECTION_MATERIALS.md
 new file mode 100644
 index 00000000..ac30673f
@@ -1828,7 +1851,7 @@ index ca3db581..3e546cda 100644
  	// MENUPAGE_MISSION_RETRY = 57 on mobile
  
 diff --git a/src/core/Pad.cpp b/src/core/Pad.cpp
-index e75510e5..dbbf11c8 100644
+index e75510e5..51c07b66 100644
 --- a/src/core/Pad.cpp
 +++ b/src/core/Pad.cpp
 @@ -1,5 +1,6 @@
@@ -1838,22 +1861,15 @@ index e75510e5..dbbf11c8 100644
  #include "crossplatform.h"
  #include "platform.h"
  #ifdef XINPUT
-@@ -922,6 +923,14 @@ void CPad::UpdateMouse()
+@@ -922,6 +923,7 @@ void CPad::UpdateMouse()
  		}
  	}
  #else
-+	// The enter/leave callback only fires when the cursor crosses the window border: if the window opens under the cursor it
-+	// never fires and the mouse stayed dead until you left and came back (alt-tab). Ask GLFW directly.
-+	// (asking costs a round trip to the window server, ~3 ms: only every 15th frame)
-+	{
-+		static int hoverFrame = 0;
-+		if((hoverFrame++ % 15) == 0)
-+			PSGLOBAL(cursorIsInWindow) = glfwGetWindowAttrib(PSGLOBAL(window), GLFW_HOVERED) != 0;
-+	}
++	// Hover state is initialized once and refreshed by cursor/focus callbacks.
  	if ( IsForegroundApp() && PSGLOBAL(cursorIsInWindow) )
  	{
  		double xpos = 1.0f, ypos;
-@@ -2797,6 +2806,9 @@ bool CPad::CycleCameraModeUpJustDown(void)
+@@ -2797,6 +2799,9 @@ bool CPad::CycleCameraModeUpJustDown(void)
  		case 2:
  		case 3:
  		{
@@ -15346,7 +15362,7 @@ index b68b805a..44a0b4d9 100644
  	return true;
  }
 diff --git a/src/skel/glfw/glfw.cpp b/src/skel/glfw/glfw.cpp
-index f1f97ee3..c0efd96a 100644
+index f1f97ee3..ed486362 100644
 --- a/src/skel/glfw/glfw.cpp
 +++ b/src/skel/glfw/glfw.cpp
 @@ -865,6 +865,13 @@ psSelectDevice()
@@ -15363,7 +15379,16 @@ index f1f97ee3..c0efd96a 100644
  		if(bestFsMode < 0){
  			printf("WARNING: Cannot find desired video mode, selecting device cancelled\n");
  			return FALSE;
-@@ -1073,9 +1080,29 @@ void psPostRWinit(void)
+@@ -1065,6 +1072,8 @@ void psPostRWinit(void)
+ 	glfwSetScrollCallback(PSGLOBAL(window), scrollCB);
+ 	glfwSetCursorPosCallback(PSGLOBAL(window), cursorCB);
+ 	glfwSetCursorEnterCallback(PSGLOBAL(window), cursorEnterCB);
++	// A window may open under an already stationary cursor without an enter event.
++	PSGLOBAL(cursorIsInWindow) = glfwGetWindowAttrib(PSGLOBAL(window), GLFW_HOVERED) != 0;
+ #endif
+ 	glfwSetWindowIconifyCallback(PSGLOBAL(window), windowIconifyCB);
+ 	glfwSetWindowFocusCallback(PSGLOBAL(window), windowFocusCB);
+@@ -1073,9 +1082,29 @@ void psPostRWinit(void)
  	_InputInitialiseJoys();
  	_InputInitialiseMouse(false);
  
@@ -15394,7 +15419,7 @@ index f1f97ee3..c0efd96a 100644
  	// Make sure all keys are released
  	CPad::GetPad(0)->Clear(true);
  	CPad::GetPad(1)->Clear(true);
-@@ -1386,6 +1413,9 @@ void dummyHandler(int sig){
+@@ -1386,6 +1415,9 @@ void dummyHandler(int sig){
  #endif
  
  void resizeCB(GLFWwindow* window, int width, int height) {
@@ -15404,7 +15429,15 @@ index f1f97ee3..c0efd96a 100644
  	/*
  	* Handle event to ensure window contents are displayed during re-size
  	* as this can be disabled by the user, then if there is not enough
-@@ -1893,6 +1923,7 @@ WinMain(HINSTANCE instance,
+@@ -1857,6 +1889,7 @@ cursorEnterCB(GLFWwindow* window, int entered) {
+ void
+ windowFocusCB(GLFWwindow* window, int focused) {
+ 	WindowFocused = !!focused;
++	if(focused) PSGLOBAL(cursorIsInWindow) = glfwGetWindowAttrib(window, GLFW_HOVERED) != 0;
+ }
+ 
+ void
+@@ -1893,6 +1926,7 @@ WinMain(HINSTANCE instance,
  int
  main(int argc, char *argv[])
  {
@@ -15412,7 +15445,7 @@ index f1f97ee3..c0efd96a 100644
  #endif
  	RwV2d pos;
  	RwInt32 i;
-@@ -1942,6 +1973,11 @@ main(int argc, char *argv[])
+@@ -1942,6 +1976,11 @@ main(int argc, char *argv[])
  	 * a time BEFORE RenderWare initialization...
  	 */
  #endif
@@ -15424,7 +15457,7 @@ index f1f97ee3..c0efd96a 100644
  	for(i=1; i<argc; i++)
  	{
  		RsEventHandler(rsPREINITCOMMANDLINE, argv[i]);
-@@ -2262,6 +2298,10 @@ main(int argc, char *argv[])
+@@ -2262,6 +2301,10 @@ main(int argc, char *argv[])
  						if(!WindowIconified)
  							RsEventHandler(rsFRONTENDIDLE, nil);
  
@@ -16882,6 +16915,41 @@ index 00000000..42d79afc
 + targets(32);m_glViewport(0,0,32,32);assert(mtlglBeginSceneMSAA(fbo,2)==2);m_glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);m_glUseProgram(back);m_glDrawArrays(GL_TRIANGLES,0,3);m_glUseProgram(program);m_glDrawArrays(GL_TRIANGLES,0,3);assert(mtlglResolveSceneMSAA(fbo));
 + printf("MSAA resize and 1x/2x/4x pipeline transitions passed.\n");return 0;
 +}
+diff --git a/tools-mtl/performance-parity-test.mm b/tools-mtl/performance-parity-test.mm
+new file mode 100644
+index 00000000..b5bd5701
+--- /dev/null
++++ b/tools-mtl/performance-parity-test.mm
+@@ -0,0 +1,29 @@
++#include "common.h"
++#include "../src/skel/skeleton.h"
++#include "../src/skel/crossplatform.h"
++#include "../vendor/librw/src/mtl/mtlgl.h"
++#define GLFW_EXPOSE_NATIVE_COCOA
++#include <GLFW/glfw3native.h>
++#import <Cocoa/Cocoa.h>
++#import <QuartzCore/CAMetalLayer.h>
++#include <cassert>
++extern void cursorEnterCB(GLFWwindow*,int);
++extern void windowFocusCB(GLFWwindow*,int);
++extern "C" int performanceParityTest(int,char**){@autoreleasepool{
++ assert(glfwInit());glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);glfwWindowHint(GLFW_CLIENT_API,GLFW_NO_API);
++ auto *window=glfwCreateWindow(48,48,"performance parity regression",nullptr,nullptr);assert(window);
++ psGlobalType state{};state.window=window;void *previous=RsGlobal.ps;RsGlobal.ps=&state;
++ cursorEnterCB(window,1);assert(state.cursorIsInWindow);cursorEnterCB(window,0);assert(!state.cursorIsInWindow);
++ windowFocusCB(window,1);assert(state.cursorIsInWindow==(glfwGetWindowAttrib(window,GLFW_HOVERED)!=0));
++ for(int i=0;i<10000;i++){cursorEnterCB(window,i&1);assert(state.cursorIsInWindow==bool(i&1));}
++ windowFocusCB(window,0);windowFocusCB(window,1);assert(state.cursorIsInWindow==(glfwGetWindowAttrib(window,GLFW_HOVERED)!=0));
++ RsGlobal.ps=previous;
++ NSWindow *native=glfwGetCocoaWindow(window);
++ // Actual Metal drawable sizes must follow requested pixels, including explicit high-density requests.
++ assert(mtlglInit((__bridge void*)native,48,48));CAMetalLayer *layer=(CAMetalLayer*)native.contentView.layer;
++ assert(layer.drawableSize.width==48 && layer.drawableSize.height==48);
++ mtlglResize(96,96);assert(layer.drawableSize.width==96 && layer.drawableSize.height==96);
++ mtlglResize(32,24);assert(layer.drawableSize.width==32 && layer.drawableSize.height==24);
++ mtlglShutdown();glfwDestroyWindow(window);glfwTerminate();
++ puts("PASS native cursor enter/leave/focus cache and Metal requested 48/96/32x24 drawable sizes. Hidden window only; no game launched.");fflush(stdout);_Exit(0);
++}}
 diff --git a/tools-mtl/reflection-composite-test.cpp b/tools-mtl/reflection-composite-test.cpp
 new file mode 100644
 index 00000000..d29a3f91
@@ -18471,6 +18539,22 @@ index 00000000..2eb6b405
 +obj=f'/tmp/{target}-ped-native-test.o';exe=f'/tmp/{target}-ped-native-test'
 +subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-std=c++17','-fobjc-arc','-c',str(root/'tools-mtl/rt-ped-native-test.mm'),'-o',obj],check=True)
 +cmd=shlex.split((base/'link.txt').read_text());cmd=[arg for arg in cmd if not arg.endswith('/extras/metalfx/MetalRT.cpp.o')];cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_pedReflectionsTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd='/tmp',env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
+diff --git a/tools/run_performance_parity_test.py b/tools/run_performance_parity_test.py
+new file mode 100644
+index 00000000..833d7ef2
+--- /dev/null
++++ b/tools/run_performance_parity_test.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-performance-parity-test.o';exe=f'/tmp/{target}-performance-parity-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-I'+str(root/'vendor/librw/src/mtl'),'-std=c++17','-fobjc-arc','-c',str(root/'tools-mtl/performance-parity-test.mm'),'-o',obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_performanceParityTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd=root,env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
 diff --git a/tools/run_reflection_composite_test.py b/tools/run_reflection_composite_test.py
 new file mode 100644
 index 00000000..8fd763a7

@@ -20,3 +20,5 @@ Upstream reVC's licensing/credits remain those of its original authors (read ups
 The latest source includes lossless dynamic scene refit, precise vehicle pane depth, current-frame wet-road/glass reflection composition, actual GPU timing and imported physical lamp-lens shattering support. Reflection resolution, geometry, rays and temporal/MSAA settings are preserved. See `docs/REFLECTION_FIXES.md` in the patched source for validation and memory-cost limits. Converter packages must be regenerated for lamp-lens support; visible fragment behaviour has not been accepted in gameplay.
 
 The 03:21 gameplay screenshots still showed blue panes after the first depth fix. The latest source separates dielectric glass Fresnel from opaque paint clear coat and fixes reversed pane normals. Native pixel tests pass; gameplay acceptance remains open.
+
+Performance fix parity is audited in the patched source `docs/PERFORMANCE_PARITY.md`: opt-in text logging, requested Retina sizing, traced-reflection environment-map bypass, event-driven mouse hover, legacy-shadow selection and HUD depth clearing are present. Metal and OpenGL builds pass; this is not a measured gameplay FPS gain.
