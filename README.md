@@ -2,7 +2,9 @@
 
 Native Vice City build kit with a Metal renderer, MetalFX temporal upscaling, ray-traced reflections/shadows/lighting and volumetric sun rays, MSAA, native Modloader/add-on cars, trainer/free roam, local vehicle deformation and imported running-gear animation. No game data or converted cars included. Requires your own compatible Vice City data and authors' permission for any mods you use.
 
-This repository contains reproducible patches against pinned upstream source, not executable releases. Run `./build.sh` on macOS with Xcode command-line tools and Homebrew. It fetches source-only dependencies and builds `source/build-metal/src/reVC`. Game launch/install is manual; stop the game, back up your executable and sign the copied binary with `codesign -f -s - reVC_metal`.
+This repository contains reproducible patches against pinned upstream source, not executable releases. **[Follow the installation guide](docs/INSTALL.md)** to build the engine and use it with your own Vice City PC game files. The guide covers prerequisites, copying game data, engine support files, signing, launching, updates and optional converted cars.
+
+The Metal backend and native mod code come from the RegTA Upstate port. `build.sh` fetches the Vice City/reVC engine tree and its librw dependency at pinned commits, then applies these patches. You do not need an existing RegTA installation. GTA III/Upstate data belongs to the separate GTA III port; this engine requires Vice City data.
 
 The converter is a separate repository: https://github.com/mindingulove/iv-vc-car-converter . Put its checkout alongside a `revc-metal` source checkout for native asset validation, or configure the source location as described there.
 
