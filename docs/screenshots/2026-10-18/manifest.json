@@ -1,0 +1,44 @@
+[
+  {
+    "file": "021609.png",
+    "caption": "Street view: red coupe, blue window appearance and shadows; 23 FPS shown.",
+    "sha256": "32af9fc92c2af7e56565c585caa054ca50eb0f84dabdd4554e2d3a6b4f515bd5",
+    "providedBy": "user",
+    "gameLaunchedOrCapturedByAgent": false
+  },
+  {
+    "file": "021637.png",
+    "caption": "Crash aftermath and detached wheel; 27 FPS shown.",
+    "sha256": "37866af6d14fcb0929294619a30f9a5262ae3de293318fc9aff91cd533a20349",
+    "providedBy": "user",
+    "gameLaunchedOrCapturedByAgent": false
+  },
+  {
+    "file": "021718.png",
+    "caption": "Wet-road view with large repeated/ghosted scene imagery; 14 FPS shown.",
+    "sha256": "e2bf1992be38511f26d4ce74fdfa95e3935efcc44090361b4679b744820c5107",
+    "providedBy": "user",
+    "gameLaunchedOrCapturedByAgent": false
+  },
+  {
+    "file": "021741.png",
+    "caption": "Wet-road motion, duplicate scene trails and reflection instability; 15 FPS shown.",
+    "sha256": "bdab309f47b5fdb4b09b5818e0a20d387ba1d7fad1ec3f6faad608141ef206b5",
+    "providedBy": "user",
+    "gameLaunchedOrCapturedByAgent": false
+  },
+  {
+    "file": "021803.png",
+    "caption": "Rain/wet-road view with duplicate imagery; 14 FPS shown.",
+    "sha256": "f0e595ad5e8e1b0fc3f23b256d28247b762b2c36840a4791cf7b4bbd284ba6e2",
+    "providedBy": "user",
+    "gameLaunchedOrCapturedByAgent": false
+  },
+  {
+    "file": "021947.png",
+    "caption": "Two cars with strongly blue/opaque-looking windows; 22 FPS shown.",
+    "sha256": "848f5d53caa6f403efd2fcb8f1748c4a05c4f32d798123be2d5fcdbf8499fd2e",
+    "providedBy": "user",
+    "gameLaunchedOrCapturedByAgent": false
+  }
+]

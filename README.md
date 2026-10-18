@@ -9,3 +9,7 @@ The converter is a separate repository: https://github.com/mindingulove/iv-vc-ca
 See the applied source's `docs/SUN_RAYS_AND_MSAA.md` and `PORT_STATUS.md`. GPU fixture success does not prove gameplay appearance/performance. Existing pane-depth/occupant reflection defects, complete vehicle visual acceptance and the long-running ANE framework abort remain open. M1 supports real native 2x/4x MSAA; 8x/16x requests fall back to actual supported samples. High render scale improves full-image sharpness at greater GPU cost.
 
 Upstream reVC's licensing/credits remain those of its original authors (read upstream README). The librw Metal derivative retains the upstream MIT license. This kit does not grant rights to Rockstar game assets or third-party car mods. No secrets, extracted textures/models, caches or source-pack archives are included.
+
+## Current gameplay evidence
+
+[User-provided screenshots and unresolved visual/performance reports](docs/GAMEPLAY_BUG_EVIDENCE.md). Higher asset detail and added lighting features are not proof of a better overall experience: window artifacts, wet-road ghosting and poor frame rate remain open.
