@@ -343,10 +343,10 @@ index 00000000..ac30673f
 +Advanced graphics now exposes "RT reflection/shadow resolution": 100%, 50%, or 25% of scene width and height. These correspond to one ray sample per 1x1, 2x2, or 4x4 scene block. Changes apply on the next frame, rebuild RT targets and invalidate temporal history. `RenderRTResolutionIdx=0/1/2` persists the selection and takes precedence over the legacy `RenderRTHalfRes` key regardless of INI order. Default is 100%. Lower choices affect the shared reflection/shadow/AO/light tracing grid, not just cars. Texture compression cannot replace this ray-count tradeoff.
 diff --git a/docs/REFLECTION_FIXES.md b/docs/REFLECTION_FIXES.md
 new file mode 100644
-index 00000000..28613c62
+index 00000000..6a8df4b0
 --- /dev/null
 +++ b/docs/REFLECTION_FIXES.md
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,16 @@
 +# Reflection receiver and frame consistency fixes
 +
 +2026-10-18. Implemented in both GTA III and Vice City Metal sources.
@@ -360,6 +360,9 @@ index 00000000..28613c62
 +Validation: production Metal reflection kernel distinguishes a pane from the opaque depth behind it; current-frame composite tests wet road/static glass/car/ped regions and immediate radiance changes; MSAA 1/2/4 tests preserve exact owners 7001/7002 and negative pane depths across encoder breaks, plus 8/16 capability fallback and resize; temporal reactive tests preserve stationary/moving car history and reject disocclusions. Vice City's actual vehicle shader tests preserve pane transmission, livery and paint behaviour. Both native builds pass.
 +
 +Gameplay acceptance remains open: inspect clean and damaged windshields, occupants, wet-road motion, transparent layering and frame cost in both games. These tests do not establish that every blue window or every source of ghosting is fixed. The legacy trails setting and temporal reconstruction can independently affect the image.
++
++
++03:21 gameplay regression: the user still observed strongly blue panes and an overlaid-looking driver after the first update. The next source correction separates glass from opaque paint's forced 60-90 percent coat and orients pane normals toward the viewer. Dielectric Fresnel starts at 0.04 (before authored specularity) and increases at grazing angles; specular highlights follow the same response. Actual Metal pixel tests compare both normal orientations and a grazing pane, preserve transmission, and verify paint remains unchanged. Gameplay acceptance remains open.
 diff --git a/docs/SUN_RAYS_AND_MSAA.md b/docs/SUN_RAYS_AND_MSAA.md
 new file mode 100644
 index 00000000..99b35cf4
@@ -5383,7 +5386,7 @@ index 7ad239f0..84035c03 100644
  extern InterpolatedFloat Power;
  extern InterpolatedLight DiffColor;
 diff --git a/src/extras/custompipes_gl.cpp b/src/extras/custompipes_gl.cpp
-index d74e40db..dafd6cac 100644
+index d74e40db..705527db 100644
 --- a/src/extras/custompipes_gl.cpp
 +++ b/src/extras/custompipes_gl.cpp
 @@ -1,4 +1,6 @@
@@ -5509,7 +5512,7 @@ index d74e40db..dafd6cac 100644
  
  	V3d eyePos = rw::engine->currentCamera->getFrame()->getLTM()->pos;
  	glUniform3fv(U(u_eye), 1, (float*)&eyePos);
-@@ -117,14 +199,49 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -117,14 +199,50 @@ vehicleRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  		setMaterial(flags, m->color, m->surfaceProps);
  
  		setTexture(0, m->texture);
@@ -5551,6 +5554,7 @@ index d74e40db..dafd6cac 100644
 +			glass=glass || strstr(name,"glass") || strstr(name,"window") || strstr(name,"windscreen");
 +		}
 +		glUniform4f(glGetUniformLocation(currentShader->program,"u_dirtProps"),glass ? 0.f : dirtAmount,dirtSeed,dirtFloor,dirtHeight);
++		glUniform1f(glGetUniformLocation(currentShader->program,"u_glassMaterial"),glass ? 1.f : 0.f);
  		glUniform4fv(U(u_reflProps), 1, reflProps);
  
 +        uint32 oldZ=rw::GetRenderState(ZWRITEENABLE),oldCull=rw::GetRenderState(CULLMODE),oldAlpha=rw::GetRenderState(ALPHATESTFUNC);
@@ -5560,7 +5564,7 @@ index d74e40db..dafd6cac 100644
  		inst++;
  	}
  
-@@ -155,8 +272,8 @@ CreateVehiclePipe(void)
+@@ -155,8 +273,8 @@ CreateVehiclePipe(void)
  	{
  #include "shaders/obj/neoVehicle_frag.inc"
  #include "shaders/obj/neoVehicle_vert.inc"
@@ -5571,7 +5575,7 @@ index d74e40db..dafd6cac 100644
  	neoVehicleShader = Shader::create(vs, fs);
  	assert(neoVehicleShader);
  	}
-@@ -201,6 +318,7 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -201,6 +319,7 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  	Material *m;
  
  	setWorldMatrix(atomic->getFrame()->getLTM());
@@ -5579,7 +5583,7 @@ index d74e40db..dafd6cac 100644
  	lightingCB(atomic);
  
  	setupVertexInput(header);
-@@ -210,6 +328,16 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -210,6 +329,16 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  
  	neoWorldShader->use();
  
@@ -5596,7 +5600,7 @@ index d74e40db..dafd6cac 100644
  	float lightfactor[4];
  
  	while(n--){
-@@ -234,12 +362,20 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -234,12 +363,20 @@ worldRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  		setMaterial(color, m->surfaceProps);
  
  		setTexture(0, m->texture);
@@ -5617,7 +5621,7 @@ index d74e40db..dafd6cac 100644
  	setTexture(1, nil);
  	teardownVertexInput(header);
  }
-@@ -258,8 +394,8 @@ CreateWorldPipe(void)
+@@ -258,8 +395,8 @@ CreateWorldPipe(void)
  	{
  #include "shaders/obj/neoWorldVC_frag.inc"
  #include "shaders/obj/default_UV2_vert.inc"
@@ -5628,7 +5632,7 @@ index d74e40db..dafd6cac 100644
  	neoWorldShader = Shader::create(vs, fs);
  	assert(neoWorldShader);
  	}
-@@ -298,7 +434,7 @@ glossRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -298,7 +435,7 @@ glossRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  	using namespace rw::gl3;
  
  	worldRenderCB(atomic, header);
@@ -5637,7 +5641,7 @@ index d74e40db..dafd6cac 100644
  		return;
  
  	Material *m;
-@@ -428,6 +564,7 @@ rimSkinRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
+@@ -428,6 +565,7 @@ rimSkinRenderCB(rw::Atomic *atomic, rw::gl3::InstanceDataHeader *header)
  
  	rw::uint32 flags = atomic->geometry->flags;
  	setWorldMatrix(atomic->getFrame()->getLTM());
@@ -5645,7 +5649,7 @@ index d74e40db..dafd6cac 100644
  	lightingCB(atomic);
  
  	setupVertexInput(header);
-@@ -516,8 +653,8 @@ CreateRimLightPipes(void)
+@@ -516,8 +654,8 @@ CreateRimLightPipes(void)
  	{
  #include "shaders/obj/simple_frag.inc"
  #include "shaders/obj/neoRimSkin_vert.inc"
@@ -5656,7 +5660,7 @@ index d74e40db..dafd6cac 100644
  	neoRimSkinShader = Shader::create(vs, fs);
  	assert(neoRimSkinShader);
  	}
-@@ -525,8 +662,8 @@ CreateRimLightPipes(void)
+@@ -525,8 +663,8 @@ CreateRimLightPipes(void)
  	{
  #include "shaders/obj/simple_frag.inc"
  #include "shaders/obj/neoRim_vert.inc"
@@ -13675,10 +13679,10 @@ index 1515ad71..f99560f2 100644
  
  	v_tex0 = in_tex0;
 diff --git a/src/extras/shaders/neoVehicle.frag b/src/extras/shaders/neoVehicle.frag
-index 2ac24f70..279e1a14 100644
+index 2ac24f70..dd6ee68e 100644
 --- a/src/extras/shaders/neoVehicle.frag
 +++ b/src/extras/shaders/neoVehicle.frag
-@@ -1,22 +1,185 @@
+@@ -1,22 +1,190 @@
 +#ifdef GL2
 +#define textureLod(s, c, l) texture(s, c)
 +#endif
@@ -13692,6 +13696,7 @@ index 2ac24f70..279e1a14 100644
 +uniform vec4 u_ssrTex;		// capture size, mode: -1 ray tracing, 0 legacy, 1 screen space
 +uniform vec4 u_reflProps;
 +uniform float u_reflectionOwner;
++uniform float u_glassMaterial; // dielectric pane, separate from opaque paint clear coat
 +uniform vec4 u_dirtProps; // coverage, stable seed, lower body Z, body height
 +uniform vec2 u_dirtAxles; // front/rear wheel Y in car space
  
@@ -13822,6 +13827,7 @@ index 2ac24f70..279e1a14 100644
 +	// misses nearby cars across large body panels, and scaled component normals used to send rays into the car.
 +	vec3 N = dot(v_normal,v_normal) > 1e-8 ? normalize(v_normal) : vec3(0.0,0.0,1.0);
 +	vec3 V = normalize(v_viewVec);
++	if(u_glassMaterial > 0.5 && dot(N,V) < 0.0) N = -N;
 +	vec3 reflected = reflect(-V,N);
 +	float f = 1.0-clamp(dot(N,V),0.0,1.0);
 +	float reflectionWeight = clamp(mix(f*f*f*f*f,1.0,u_reflProps.x)*u_reflProps.z,0.0,0.9);
@@ -13831,6 +13837,8 @@ index 2ac24f70..279e1a14 100644
 +		float coat = clamp(u_reflProps.z,0.0,1.0);
 +		reflectionWeight = mix(0.60,0.90,f*f*f*f*f)*coat;
 +	}
++	float glassFresnel = 0.04 + 0.96*f*f*f*f*f;
++	if(u_glassMaterial > 0.5) reflectionWeight = glassFresnel*clamp(u_reflProps.z,0.0,1.0);
 +	float dirt=dirtCoverage();
 +	reflectionWeight *= 1.0-dirt*0.88;
 +	vec4 sampled = texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));
@@ -13865,10 +13873,11 @@ index 2ac24f70..279e1a14 100644
  
 -	vec3 pass2 = v_reflcolor.rgb * v_fog;
 +	vec3 pass2 = v_reflcolor.rgb * v_fog * (1.0-dirt*0.9);
++	if(u_glassMaterial > 0.5) pass2 *= glassFresnel;
  
  	vec4 color;
  	color.rgb = pass1.rgb*pass1.a + pass2;
-@@ -25,5 +188,15 @@ main(void)
+@@ -25,5 +193,15 @@ main(void)
  //	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);
  	DoAlphaTest(color.a);
  
@@ -14053,10 +14062,10 @@ index 7cd199d0..ad81d0c4 100644
  
  "	v_tex0 = in_tex0;\n"
 diff --git a/src/extras/shaders/obj/neoVehicle_frag.inc b/src/extras/shaders/obj/neoVehicle_frag.inc
-index 20537440..6c51f7d0 100644
+index 20537440..c38d82c9 100644
 --- a/src/extras/shaders/obj/neoVehicle_frag.inc
 +++ b/src/extras/shaders/obj/neoVehicle_frag.inc
-@@ -1,23 +1,186 @@
+@@ -1,23 +1,191 @@
  const char *neoVehicle_frag_src =
 +"#ifdef GL2\n"
 +"#define textureLod(s, c, l) texture(s, c)\n"
@@ -14071,6 +14080,7 @@ index 20537440..6c51f7d0 100644
 +"uniform vec4 u_ssrTex;		// capture size, mode: -1 ray tracing, 0 legacy, 1 screen space\n"
 +"uniform vec4 u_reflProps;\n"
 +"uniform float u_reflectionOwner;\n"
++"uniform float u_glassMaterial; // dielectric pane, separate from opaque paint clear coat\n"
 +"uniform vec4 u_dirtProps; // coverage, stable seed, lower body Z, body height\n"
 +"uniform vec2 u_dirtAxles; // front/rear wheel Y in car space\n"
  
@@ -14201,6 +14211,7 @@ index 20537440..6c51f7d0 100644
 +"	// misses nearby cars across large body panels, and scaled component normals used to send rays into the car.\n"
 +"	vec3 N = dot(v_normal,v_normal) > 1e-8 ? normalize(v_normal) : vec3(0.0,0.0,1.0);\n"
 +"	vec3 V = normalize(v_viewVec);\n"
++"	if(u_glassMaterial > 0.5 && dot(N,V) < 0.0) N = -N;\n"
 +"	vec3 reflected = reflect(-V,N);\n"
 +"	float f = 1.0-clamp(dot(N,V),0.0,1.0);\n"
 +"	float reflectionWeight = clamp(mix(f*f*f*f*f,1.0,u_reflProps.x)*u_reflProps.z,0.0,0.9);\n"
@@ -14210,6 +14221,8 @@ index 20537440..6c51f7d0 100644
 +"		float coat = clamp(u_reflProps.z,0.0,1.0);\n"
 +"		reflectionWeight = mix(0.60,0.90,f*f*f*f*f)*coat;\n"
 +"	}\n"
++"	float glassFresnel = 0.04 + 0.96*f*f*f*f*f;\n"
++"	if(u_glassMaterial > 0.5) reflectionWeight = glassFresnel*clamp(u_reflProps.z,0.0,1.0);\n"
 +"	float dirt=dirtCoverage();\n"
 +"	reflectionWeight *= 1.0-dirt*0.88;\n"
 +"	vec4 sampled = texture(tex0, vec2(v_tex0.x, 1.0-v_tex0.y));\n"
@@ -14244,10 +14257,11 @@ index 20537440..6c51f7d0 100644
  
 -"	vec3 pass2 = v_reflcolor.rgb * v_fog;\n"
 +"	vec3 pass2 = v_reflcolor.rgb * v_fog * (1.0-dirt*0.9);\n"
++"	if(u_glassMaterial > 0.5) pass2 *= glassFresnel;\n"
  
  "	vec4 color;\n"
  "	color.rgb = pass1.rgb*pass1.a + pass2;\n"
-@@ -26,6 +189,16 @@ const char *neoVehicle_frag_src =
+@@ -26,6 +194,16 @@ const char *neoVehicle_frag_src =
  "//	color.rgb = mix(u_fogColor.rgb, color.rgb, v_fog);\n"
  "	DoAlphaTest(color.a);\n"
  
@@ -16216,6 +16230,124 @@ index 00000000..1ca6534a
 + lens.broken=broken;
 + return changed && broken && lens.componentVisible; // exactly one shatter event on the intact -> broken transition
 +}
+diff --git a/tools-mtl/dielectric-glass-test.cpp b/tools-mtl/dielectric-glass-test.cpp
+new file mode 100644
+index 00000000..c5672e96
+--- /dev/null
++++ b/tools-mtl/dielectric-glass-test.cpp
+@@ -0,0 +1,112 @@
++// Hidden-window test of the actual vehicle shaders and final ray-reflection composite.
++// clang++ -std=c++17 tools-mtl/vehicle-paint-reflection-test.cpp -I/opt/homebrew/include \
++//   -L/opt/homebrew/lib -lglfw -framework OpenGL -o /tmp/vehicle-paint-reflection-test
++// Run from the repository root; optional arguments select old vertex/fragment shader snapshots.
++#define GL_SILENCE_DEPRECATION
++#define GLFW_INCLUDE_NONE
++#include <GLFW/glfw3.h>
++#include "glad/glad.h"
++#include "mtlgl.h"
++#include <cstdlib>
++#include <fstream>
++#include <iterator>
++#include <string>
++#include <vector>
++#include <cassert>
++#include <cstring>
++#include <cstdio>
++#include <cmath>
++
++static void testAttrib4(GLuint i,float x,float y,float z,float w){
++ float a[]={x,y,z,w,x,y,z,w,x,y,z,w};GLuint b;glGenBuffers(1,&b);glBindBuffer(GL_ARRAY_BUFFER,b);glBufferData(GL_ARRAY_BUFFER,sizeof(a),a,GL_STATIC_DRAW);glEnableVertexAttribArray(i);glVertexAttribPointer(i,4,GL_FLOAT,GL_FALSE,0,nullptr);
++}
++static void testAttrib3(GLuint i,float x,float y,float z){testAttrib4(i,x,y,z,1);}
++static std::string read(const char *p){std::ifstream f(p);std::string s((std::istreambuf_iterator<char>(f)),{});assert(!s.empty());return s;}
++static GLuint shader(GLenum type,const std::string &s){GLuint sh=glCreateShader(type);const char *p=s.c_str();glShaderSource(sh,1,&p,nullptr);glCompileShader(sh);GLint ok;glGetShaderiv(sh,GL_COMPILE_STATUS,&ok);if(!ok){char log[8192];glGetShaderInfoLog(sh,sizeof(log),nullptr,log);puts(log);}assert(ok);return sh;}
++static GLuint program(const std::string &v,const std::string &f){GLuint p=glCreateProgram();glAttachShader(p,shader(GL_VERTEX_SHADER,v));glAttachShader(p,shader(GL_FRAGMENT_SHADER,f));glLinkProgram(p);GLint ok;glGetProgramiv(p,GL_LINK_STATUS,&ok);assert(ok);return p;}
++static std::string extract(const std::string &s,const char *name){std::string mark=std::string("static const char *")+name+" =";size_t start=s.find(mark);assert(start!=std::string::npos);std::string r;bool q=false;for(size_t i=start+mark.size();i<s.size();i++){char c=s[i];if(!q&&c==';')break;if(c=='"'){q=!q;continue;}if(!q)continue;if(c=='\\'){c=s[++i];if(c=='n')c='\n';else if(c=='t')c='\t';}r+=c;}return r;}
++static void texture(GLuint t,int unit,GLenum target,const float *p,int w=32,int h=32){glActiveTexture(GL_TEXTURE0+unit);glBindTexture(target,t);glTexImage2D(target,0,GL_RGBA32F,w,h,0,GL_RGBA,GL_FLOAT,p);glTexParameteri(target,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(target,GL_TEXTURE_MAG_FILTER,GL_NEAREST);glTexParameteri(target,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(target,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);}
++extern "C" int dielectricGlassTest(int argc,char **argv){
++ assert(mtlglInit(nullptr,32,32));assert(gladLoadGLLoader((GLADloadproc)mtlglGetProcAddress,33));
++
++
++
++ std::string decl="#version 330\n#define VSIN(index) layout(location=index) in\n#define VSOUT out\n#define FSIN in\n#define FRAGCOLOR(c) (fragColor=c)\n#define DIRECTIONALS\n#define REFL_OUT\n#define HAS_VEL_OUT\n#define VEL_PIPE\n";
++ auto p=program(decl+read("vendor/librw/src/gl/shaders/header.vert")+read(argc>1?argv[1]:"src/extras/shaders/neoVehicle.vert"),decl+read("vendor/librw/src/gl/shaders/header.frag")+read(argc>2?argv[2]:"src/extras/shaders/neoVehicle.frag"));
++ auto device=read("vendor/librw/src/gl/gl3device.cpp");auto composite=program(extract(device,"rsVertSrc"),extract(device,"rsRTCompositeSrc"));auto prep=program(extract(device,"rsVertSrc"),extract(device,"rsRTPrepSrc"));
++ GLuint vao,vbo;glGenVertexArrays(1,&vao);glBindVertexArray(vao);glGenBuffers(1,&vbo);glBindBuffer(GL_ARRAY_BUFFER,vbo);float vertices[]={-2,-2,0,4,-2,0,-2,4,0};glBufferData(GL_ARRAY_BUFFER,sizeof(vertices),vertices,GL_STATIC_DRAW);glEnableVertexAttribArray(0);glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,nullptr);testAttrib3(1,sqrtf(.5f),0,sqrtf(.5f));testAttrib4(2,1,1,1,1);
++ GLuint tex[9],fbo;glGenTextures(9,tex);glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);GLenum bufs[]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1,GL_COLOR_ATTACHMENT2};for(int i=0;i<3;i++){texture(tex[i],0,GL_TEXTURE_2D,nullptr);glFramebufferTexture2D(GL_FRAMEBUFFER,bufs[i],GL_TEXTURE_2D,tex[i],0);}assert(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
++ float white[]={1,1,1,1},red[]={1,0,0,1};texture(tex[3],0,GL_TEXTURE_2D,white,1,1);texture(tex[4],1,GL_TEXTURE_2D,red,1,1);glViewport(0,0,32,32);
++ float identity[]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1},world[16];float maxError=0;
++ float scales[]={.5f,1.f,2.f,2.f};
++ for(int scenario=0;scenario<4;scenario++){
++  float scale=scales[scenario];
++  glUseProgram(p);glDrawBuffers(3,bufs);glDisable(GL_BLEND);texture(tex[3],0,GL_TEXTURE_2D,white,1,1);texture(tex[4],1,GL_TEXTURE_2D,red,1,1);
++  memcpy(world,identity,sizeof(world));world[0]=world[5]=world[10]=scale;if(scenario==3){world[5]=1;world[10]=.5f;}
++  glUniformMatrix4fv(glGetUniformLocation(p,"u_world"),1,GL_FALSE,world);glUniformMatrix4fv(glGetUniformLocation(p,"u_proj"),1,GL_FALSE,identity);glUniformMatrix4fv(glGetUniformLocation(p,"u_view"),1,GL_FALSE,identity);
++  glUniform3f(glGetUniformLocation(p,"u_eye"),0,0,10);glUniform4f(glGetUniformLocation(p,"u_alphaRef"),0,2,0,0);glUniform4f(glGetUniformLocation(p,"u_fogData"),0,0,0,1);glUniform4f(glGetUniformLocation(p,"u_matColor"),.2f,.2f,.2f,1);glUniform4f(glGetUniformLocation(p,"u_ambLight"),1,1,1,1);glUniform4f(glGetUniformLocation(p,"u_surfProps"),1,0,0,0);glUniform4f(glGetUniformLocation(p,"u_reflProps"),.4f,1,.8f,1);glUniform1i(glGetUniformLocation(p,"tex0"),0);glUniform1i(glGetUniformLocation(p,"tex1"),1);glUniform4f(glGetUniformLocation(p,"u_ssrTex"),1,1,-1,0);
++  glUniformMatrix4fv(glGetUniformLocation(p,"u_vpCur"),1,GL_FALSE,identity);glUniformMatrix4fv(glGetUniformLocation(p,"u_vpPrev"),1,GL_FALSE,identity);glUniformMatrix4fv(glGetUniformLocation(p,"u_prevWorld"),1,GL_FALSE,identity);glUniform1f(glGetUniformLocation(p,"u_velOn"),1);glUniform1f(glGetUniformLocation(p,"u_reflectionOwner"),17);
++  glDrawArrays(GL_TRIANGLES,0,3);float marker[4];glReadBuffer(GL_COLOR_ATTACHMENT1);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,marker);maxError=fmaxf(maxError,fabsf(marker[2]+17));maxError=fmaxf(maxError,fabsf(marker[3]+.5f));float direction[4],base[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,direction);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,base);
++  float x=-.03125f,y=-.03125f,z=10,n=sqrtf(x*x+y*y+z*z);float nx=1/world[0],nz=1/world[10],nn=sqrtf(nx*nx+nz*nz);nx/=nn;nz/=nn;float vn=(x*nx+z*nz)/n;float expected[]={(-x/n+2*vn*nx)*.5f+.5f,(-y/n)*.5f+.5f,(-z/n+2*vn*nz)*.5f+.5f};
++  for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(direction[c]-expected[c]));
++  for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(base[c]-.2f));
++  float grazing=1-fmaxf(0,fminf(1,vn));
++  float coatExpected=(.60f+.30f*powf(grazing,5))*.8f;
++  maxError=fmaxf(maxError,fabsf(direction[3]-coatExpected));
++  // The prep pass must carry the exact receiving-car tag into the trace's selected depth sample.
++  GLuint prepFbo;glGenFramebuffers(1,&prepFbo);glBindFramebuffer(GL_FRAMEBUFFER,prepFbo);
++  for(int i=0;i<2;i++){texture(tex[7+i],0,GL_TEXTURE_2D,nullptr);glFramebufferTexture2D(GL_FRAMEBUFFER,bufs[i],GL_TEXTURE_2D,tex[7+i],0);}glDrawBuffers(2,bufs);
++  glUseProgram(prep);texture(tex[3],0,GL_TEXTURE_2D,white,1,1);glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,tex[2]);glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,tex[1]);
++  glUniform1i(glGetUniformLocation(prep,"depthTex"),0);glUniform1i(glGetUniformLocation(prep,"reflTex"),1);glUniform1i(glGetUniformLocation(prep,"velTex"),2);glUniform1i(glGetUniformLocation(prep,"div"),1);glDrawArrays(GL_TRIANGLES,0,3);glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,marker);maxError=fmaxf(maxError,fabsf(marker[3]-17));glBindFramebuffer(GL_FRAMEBUFFER,fbo);glDeleteFramebuffers(1,&prepFbo);glReadBuffer(GL_COLOR_ATTACHMENT0);
++  // A single ray-traced coat carries the material reflection at the default RT strength.
++  std::vector<float> green(32*32*4,0),vel(green.size(),0);for(int i=0;i<32*32;i++){green[i*4]=float(i%32)/31;green[i*4+1]=float(i/32)/31;green[i*4+2]=.25f;green[i*4+3]=1;vel[i*4+3]=-.5f;}
++  texture(tex[5],0,GL_TEXTURE_RECTANGLE,green.data());glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,tex[2]);texture(tex[6],2,GL_TEXTURE_2D,vel.data());glDrawBuffers(1,bufs);glUseProgram(composite);glUniform1i(glGetUniformLocation(composite,"rtTex"),0);glUniform1i(glGetUniformLocation(composite,"reflTex"),1);glUniform1i(glGetUniformLocation(composite,"velTex"),2);glUniform1f(glGetUniformLocation(composite,"strength"),.5f);glUniform1i(glGetUniformLocation(composite,"div"),1);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);float result[4];glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,result);float a=direction[3];
++  for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(result[c]-(base[c]*(1-a)+green[(16*32+16)*4+c]*a)));
++  // Diffuse occlusion must not dim the clear-coat image.
++  for(float shade : {0.15f, 0.6f, 1.0f}){
++   glClearColor(base[0]*shade,base[1]*shade,base[2]*shade,1);glClear(GL_COLOR_BUFFER_BIT);
++   glDrawArrays(GL_TRIANGLES,0,3);float shaded[4];glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,shaded);
++   for(int c=0;c<3;c++)maxError=fmaxf(maxError,fabsf(shaded[c]-(base[c]*shade*(1-a)+green[(16*32+16)*4+c]*a)));
++  }
++  printf("Panel scale %.1f: ray %.4f %.4f %.4f, paint %.4f %.4f %.4f, reflected car %.4f %.4f %.4f\n",scale,direction[0]*2-1,direction[1]*2-1,direction[2]*2-1,base[0],base[1],base[2],result[0],result[1],result[2]);
++ }
++ // A real glass draw must retain the interior contribution and emit a nonzero ray weight.
++ glBindFramebuffer(GL_FRAMEBUFFER,fbo);glDrawBuffers(3,bufs);glUseProgram(p);
++ glUniformMatrix4fv(glGetUniformLocation(p,"u_world"),1,GL_FALSE,identity);
++ glUniform4f(glGetUniformLocation(p,"u_ambLight"),1,1,1,1);
++ glUniform4f(glGetUniformLocation(p,"u_dirtProps"),0,0,0,1);
++ float pane[]={82.f/255,89.f/255,82.f/255,49.f/255};
++ float previousOpacity=0,currentOpacity=0;
++ glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),1);
++ for(int corrected=0;corrected<2;corrected++){
++  glUseProgram(p);glDrawBuffers(3,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
++  texture(tex[3],0,GL_TEXTURE_2D,pane,1,1);texture(tex[4],1,GL_TEXTURE_2D,red,1,1);
++  glUniform4f(glGetUniformLocation(p,"u_matColor"),1,1,1,corrected?249.f/255:110.f/255);
++  glUniform4f(glGetUniformLocation(p,"u_reflProps"),.4f,1,corrected?.65f:0,0);
++  glUniform4f(glGetUniformLocation(p,"u_ssrTex"),1,1,-1,0);
++  glDisable(GL_BLEND);glDrawArrays(GL_TRIANGLES,0,3);
++  float ray[4],paneColor[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);
++  glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,paneColor);
++  assert(paneColor[3]>.07f && paneColor[3]<.25f);
++  if(corrected){assert(ray[3]>.026f && ray[3]<.05f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
++  // Render the same pane over an opaque interior using the production premultiplied blend.
++  glDrawBuffers(1,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
++  glEnable(GL_BLEND);glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);
++  float blended[4];glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,blended);
++  float background[]={.5f,.4f,.3f};for(int c=0;c<3;c++)assert(fabsf(blended[c]-(paneColor[c]+background[c]*(1-paneColor[3])))<.002f);
++ }
++ assert(currentOpacity>previousOpacity*2.2f);
++ // A pane's back face must have the same dielectric response, not become an opaque mirror.
++ float glassWeight[3]={};
++ glUseProgram(p);glDrawBuffers(3,bufs);glDisable(GL_BLEND);
++ for(int side=0;side<3;side++){
++  float nx=side==2?sqrtf(.99f):0.f,nz=side==1?-1.f:(side==2?.1f:1.f);
++  testAttrib3(1,nx,0,nz);glDrawArrays(GL_TRIANGLES,0,3);float ray[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);glassWeight[side]=ray[3];
++ }
++ assert(fabsf(glassWeight[0]-.04f*.65f)<.0001f);assert(fabsf(glassWeight[1]-glassWeight[0])<1e-6f);assert(glassWeight[2]>glassWeight[0]*10 && glassWeight[2]<.65f);
++ printf("PASS dielectric glass: normal %.5f, reverse normal %.5f, grazing %.5f; opaque paint response remains separate.\n",glassWeight[0],glassWeight[1],glassWeight[2]);
++ testAttrib3(1,sqrtf(.5f),0,sqrtf(.5f));glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),0);
++
++ printf("PASS actual Metal vehicle glass shader: opacity %.4f -> %.4f, reflection weight restored, opaque interior remains visible through premultiplied pane.\n",previousOpacity,currentOpacity);
++ printf("PASS dielectric pane and opaque paint regressions, maximum error %.6f\n",maxError);fflush(stdout);std::_Exit(maxError<.002f?0:2);
++}
 diff --git a/tools-mtl/difftest.mm b/tools-mtl/difftest.mm
 new file mode 100644
 index 00000000..4bf306fa
@@ -17822,10 +17954,10 @@ index 00000000..e2727f9c
 + printf("failures: %d\n",fails); return fails; }
 diff --git a/tools-mtl/vehicle-glass-test.cpp b/tools-mtl/vehicle-glass-test.cpp
 new file mode 100644
-index 00000000..42d0c875
+index 00000000..2d3b4bae
 --- /dev/null
 +++ b/tools-mtl/vehicle-glass-test.cpp
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,174 @@
 +// Hidden-window test of the actual vehicle shaders and final ray-reflection composite.
 +// clang++ -std=c++17 tools-mtl/vehicle-paint-reflection-test.cpp -I/opt/homebrew/include \
 +//   -L/opt/homebrew/lib -lglfw -framework OpenGL -o /tmp/vehicle-paint-reflection-test
@@ -17905,6 +18037,7 @@ index 00000000..42d0c875
 + glUniform4f(glGetUniformLocation(p,"u_dirtProps"),0,0,0,1);
 + float pane[]={82.f/255,89.f/255,82.f/255,49.f/255};
 + float previousOpacity=0,currentOpacity=0;
++ glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),1);
 + for(int corrected=0;corrected<2;corrected++){
 +  glUseProgram(p);glDrawBuffers(3,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
 +  texture(tex[3],0,GL_TEXTURE_2D,pane,1,1);texture(tex[4],1,GL_TEXTURE_2D,red,1,1);
@@ -17915,7 +18048,7 @@ index 00000000..42d0c875
 +  float ray[4],paneColor[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);
 +  glReadBuffer(GL_COLOR_ATTACHMENT0);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,paneColor);
 +  assert(paneColor[3]>.07f && paneColor[3]<.25f);
-+  if(corrected){assert(ray[3]>.35f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
++  if(corrected){assert(ray[3]>.026f && ray[3]<.05f);currentOpacity=paneColor[3];}else{assert(fabsf(ray[3])<1e-6);previousOpacity=paneColor[3];}
 +  // Render the same pane over an opaque interior using the production premultiplied blend.
 +  glDrawBuffers(1,bufs);glClearColor(.5f,.4f,.3f,1);glClear(GL_COLOR_BUFFER_BIT);
 +  glEnable(GL_BLEND);glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);glDrawArrays(GL_TRIANGLES,0,3);
@@ -17923,6 +18056,17 @@ index 00000000..42d0c875
 +  float background[]={.5f,.4f,.3f};for(int c=0;c<3;c++)assert(fabsf(blended[c]-(paneColor[c]+background[c]*(1-paneColor[3])))<.002f);
 + }
 + assert(currentOpacity>previousOpacity*2.2f);
++ // A pane's back face must have the same dielectric response, not become an opaque mirror.
++ float glassWeight[3]={};
++ glUseProgram(p);glDrawBuffers(3,bufs);glDisable(GL_BLEND);
++ for(int side=0;side<3;side++){
++  float nx=side==2?sqrtf(.99f):0.f,nz=side==1?-1.f:(side==2?.1f:1.f);
++  testAttrib3(1,nx,0,nz);glDrawArrays(GL_TRIANGLES,0,3);float ray[4];glReadBuffer(GL_COLOR_ATTACHMENT2);glReadPixels(16,16,1,1,GL_RGBA,GL_FLOAT,ray);glassWeight[side]=ray[3];
++ }
++ assert(fabsf(glassWeight[0]-.04f*.65f)<.0001f);assert(fabsf(glassWeight[1]-glassWeight[0])<1e-6f);assert(glassWeight[2]>glassWeight[0]*10 && glassWeight[2]<.65f);
++ printf("PASS dielectric glass: normal %.5f, reverse normal %.5f, grazing %.5f; opaque paint response remains separate.\n",glassWeight[0],glassWeight[1],glassWeight[2]);
++ testAttrib3(1,sqrtf(.5f),0,sqrtf(.5f));glUniform1f(glGetUniformLocation(p,"u_glassMaterial"),0);
++
 + printf("PASS actual Metal vehicle glass shader: opacity %.4f -> %.4f, reflection weight restored, opaque interior remains visible through premultiplied pane.\n",previousOpacity,currentOpacity);
 + // Reset state for the original paint/quantization regressions.
 + glDisable(GL_BLEND);glUniform4f(glGetUniformLocation(p,"u_matColor"),.2f,.2f,.2f,1);glUniform4f(glGetUniformLocation(p,"u_reflProps"),.4f,1,.8f,1);
@@ -18198,6 +18342,22 @@ index 00000000..32c41dcb
 +    assert all(math.isfinite(v) for v in segment);segments.append(segment)
 +assert len(segments)>1000,len(segments)
 +out=root/'data/freeroam-map.dat';out.write_text(''.join('%d %.3f %.3f %.3f %.3f %.3f %.3f\n'%s for s in segments));print(f'{groups} land path groups, {len(segments)} segments -> {out}')
+diff --git a/tools/run_dielectric_glass_test.py b/tools/run_dielectric_glass_test.py
+new file mode 100644
+index 00000000..aa1639cb
+--- /dev/null
++++ b/tools/run_dielectric_glass_test.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shlex, subprocess
++root=Path(__file__).resolve().parents[1]
++target='reVC' if root.name=='revc-metal' else 're3'
++base=root/'build-metal/src/CMakeFiles'/f'{target}.dir'
++flags=dict(line.split(' = ',1) for line in (base/'flags.make').read_text().splitlines() if ' = ' in line)
++obj=f'/tmp/{target}-dielectric-glass-test.o';exe=f'/tmp/{target}-dielectric-glass-test'
++subprocess.run(['clang++',*shlex.split(flags['CXX_DEFINES'].replace('-DNDEBUG','')),*shlex.split(flags['CXX_INCLUDES']),'-I'+str(root/'vendor/librw/src/gl'),'-I'+str(root/'vendor/librw/src/mtl'),'-std=c++17','-c',str(root/'tools-mtl/dielectric-glass-test.cpp'),'-o',obj],check=True)
++cmd=shlex.split((base/'link.txt').read_text());cmd[cmd.index('-o')+1]=exe;cmd += [obj,'-Wl,-e,_dielectricGlassTest'];subprocess.run(cmd,check=True,cwd=root/'build-metal/src');subprocess.run([exe],check=True,cwd=root,env=__import__('os').environ|{'MTL_DEBUG_LAYER':'1'})
 diff --git a/tools/run_fleet_install_test.py b/tools/run_fleet_install_test.py
 new file mode 100644
 index 00000000..128377d6
